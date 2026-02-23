@@ -122,7 +122,12 @@ async def main_async():
         parsed = try_parse_tool_call(llm_output, actions_list)
         if parsed:
             # Print the action JSON (the agent's intended action)
-            print("Assistant (action):", parsed.json())
+            # Use `model_dump_json` when available (pydantic v2), fall back to `.json()` for compatibility.
+            if hasattr(parsed, "model_dump_json"):
+                parsed_json = parsed.model_dump_json()
+            else:
+                parsed_json = parsed.json()
+            print("Assistant (action):", parsed_json)
 
             # Optionally execute a matching plugin handler if allowed and available
             if args.run_plugins:
@@ -137,7 +142,7 @@ async def main_async():
                     print(f"No plugin registered for action '{parsed.tool}'")
 
             # Save assistant reply (the JSON) in history
-            history.append({"role": "assistant", "content": parsed.json()})
+            history.append({"role": "assistant", "content": parsed_json})
             history.append({"role": "user", "content": user_input})
             continue
 
