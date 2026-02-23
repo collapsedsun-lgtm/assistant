@@ -1,87 +1,118 @@
-import requests
+import argparse
 import json
+import os
+import requests
 from datetime import datetime
+from typing import List, Dict
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "gemma:2b"
+from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
+import actions
 
-SYSTEM_PROMPT = """
-You are a home automation assistant.
+# Number of most-recent exchanges (user + assistant) to include in context.
+# This is a hardcoded constant for now; make configurable later if needed.
+ROLLING_WINDOW = 5
 
-Available tools:
-- get_time
-- turn_on_light(room)
-- turn_off_light(room)
 
-If a tool is required, respond ONLY in this exact JSON format:
-{"tool": "tool_name", "args": {"key": "value"}}
+def load_system_prompt() -> str:
+    path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
-Do not include explanations.
-Do not include extra text.
-If no tool is needed, respond normally in plain text.
-If you can't map a request to a tool, just say you can't do that
-"""
 
-def call_llm(user_input):
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_input}
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "top_p": 0.9,
-                "num_predict": 150
-            }
-        }
-    )
+def build_messages(system_prompt: str, actions_desc: str, history: List[Dict], user_input: str) -> List[Dict]:
+    # Compose system prompt with a description of available actions
+    system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
 
-    data = response.json()
+    msgs = [{"role": "system", "content": system_content}]
 
-    if "message" not in data:
-        raise Exception(f"Unexpected Ollama response: {data}")
+    # Include rolling history (already formatted as role/content dicts)
+    start = max(0, len(history) - (ROLLING_WINDOW * 2))
+    msgs.extend(history[start:])
+
+    # Add current user input
+    msgs.append({"role": "user", "content": user_input})
+    return msgs
+
+
+def call_llm(user_input: str, history: List[Dict], mock: bool = False) -> str:
+    if mock:
+        # Simple mock: if user asks to get time, return a tool call
+        if "time" in user_input.lower():
+            return json.dumps({"tool": "get_time", "args": {}})
+        return "I would do that if I could."
+
+    system_prompt = load_system_prompt()
+    actions_list = actions.load_actions()
+    actions_desc = actions.actions_description(actions_list)
+
+    messages = build_messages(system_prompt, actions_desc, history, user_input)
+
+    payload = {"model": MODEL, "messages": messages}
+    payload.update(LLM_OPTIONS)
+
+    try:
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=10)
+    except requests.RequestException as e:
+        raise RuntimeError(f"LLM request failed: {e}")
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"LLM returned status {resp.status_code}: {resp.text}")
+
+    data = resp.json()
+    if "message" not in data or "content" not in data["message"]:
+        raise RuntimeError(f"Unexpected LLM response shape: {data}")
 
     return data["message"]["content"]
 
 
-def execute_tool(tool_name, args):
-    print(tool_name)
-    if tool_name == "get_time":
-        return f"The time is {datetime.now().strftime('%H:%M:%S')}."
+def try_parse_tool_call(llm_output: str, actions_list: List[Dict]):
+    try:
+        parsed = json.loads(llm_output)
+    except json.JSONDecodeError:
+        return None
 
-    if tool_name == "turn_on_light":
-        room = args.get("room", "unknown")
-        return f"Light in {room} turned on."
-
-    if tool_name == "turn_off_light":
-        room = args.get("room", "unknown")
-        return f"Light in {room} turned off."
-
-    return "Unknown tool."
+    if actions.validate_tool_call(parsed, actions_list):
+        return parsed
+    return None
 
 
 def main():
-    while True:
-        user_input = input("You: ")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
+    args = parser.parse_args()
 
-        llm_output = call_llm(user_input)
+    history: List[Dict] = []
+    actions_list = actions.load_actions()
+
+    print("Starting agent REPL (type Ctrl-C to exit).\nActions are only emitted as JSON; this program will not execute them.")
+
+    while True:
+        try:
+            user_input = input("You: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye")
+            break
+
+        try:
+            llm_output = call_llm(user_input, history, mock=args.mock)
+        except Exception as e:
+            print("Assistant (error):", e)
+            continue
 
         # Try to parse JSON tool call
-        try:
-            parsed = json.loads(llm_output)
-            if "tool" in parsed:
-                result = execute_tool(parsed["tool"], parsed.get("args", {}))
-                print("Assistant:", result)
-                continue
-        except json.JSONDecodeError:
-            pass
+        parsed = try_parse_tool_call(llm_output, actions_list)
+        if parsed:
+            # Do not execute — just print the action JSON so a separate runner can act on it
+            print("Assistant (action):", json.dumps(parsed))
+            # Save assistant reply (the JSON) in history
+            history.append({"role": "assistant", "content": json.dumps(parsed)})
+            history.append({"role": "user", "content": user_input})
+            continue
 
-        # If not JSON, treat as normal reply
+        # Not a tool call: normal assistant reply
         print("Assistant:", llm_output)
+        history.append({"role": "assistant", "content": llm_output})
+        history.append({"role": "user", "content": user_input})
 
 
 if __name__ == "__main__":
