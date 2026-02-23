@@ -5,6 +5,7 @@ import os
 from typing import List
 
 import aiohttp
+import inspect
 
 from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
 import actions
@@ -29,33 +30,23 @@ def build_messages(
     user_input: str,
     rolling_window: int,
     summarize_memory: bool = False,
+    prefetch_texts: List[str] | None = None,
 ) -> List[dict]:
     # Compose system prompt with a description of available actions
     system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
 
+
     msgs = [{"role": "system", "content": system_content}]
-"""Async REPL agent for generating JSON-encoded actions from an LLM.
-
-This module implements a small command-line agent that sends user inputs
-to a locally running LLM (e.g. Ollama) and expects either a plain-text
-response or a JSON-formatted tool invocation from the model. Tool
-invocations are validated against `actions.json` and may optionally be
-executed by plugins discovered in `plugins/`.
-
-Key responsibilities:
-- Build structured messages for the LLM including a system prompt,
-  a short rolling context of previous exchanges, and an optional
-  memory summary.
-- Call the LLM asynchronously via HTTP and handle errors/timeouts.
-- Validate any JSON tool calls using pydantic models in `actions.py`.
-- Optionally load and run discovered plugin handlers for actions.
-"""
-
-
     # Optionally include a memory summary as a system-level note
     if summarize_memory and history:
         summary = memory_summarizer.summarize(history, rolling_window)
         msgs.append({"role": "system", "content": "Memory summary: " + summary})
+
+    # Optionally include sanitized pre-fetched facts (from pre_send hooks)
+    if prefetch_texts:
+        combined = "\n\n".join(t for t in prefetch_texts if t)
+        if combined:
+            msgs.append({"role": "system", "content": "Pre-fetched facts (sanitized):\n" + combined})
 
     # Include rolling history (already formatted as role/content dicts)
     start = max(0, len(history) - (rolling_window * 2))
@@ -76,18 +67,63 @@ Key responsibilities:
     return msgs
 
 
-async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False, rolling_window: int = 5, summarize_memory: bool = False) -> str:
+async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False, rolling_window: int = 5, summarize_memory: bool = False, pre_send_hooks: List[callable] | None = None) -> tuple:
     if mock:
         # Simple mock: if user asks to get time, return a tool call
         if "time" in user_input.lower():
-            return json.dumps({"tool": "get_time", "args": {}})
-        return "I would do that if I could."
+            return json.dumps({"tool": "get_time", "args": {}}), []
+        return "I would do that if I could.", []
 
     system_prompt = load_system_prompt()
     actions_list = actions.load_actions()
     actions_desc = actions.actions_description(actions_list)
 
-    messages = build_messages(system_prompt, actions_desc, history, user_input, rolling_window, summarize_memory)
+    # Run pre-send hooks (they should fetch and sanitize web data before returning strings)
+    prefetch_texts: List[str] = []
+    if pre_send_hooks:
+        for hook in pre_send_hooks:
+            try:
+                # Try calling the hook with a `debug` flag when supported.
+                maybe = None
+                try:
+                    sig = inspect.signature(hook)
+                    if len(sig.parameters) >= 3:
+                        maybe = await hook(user_input, history, debug)
+                    else:
+                        maybe = await hook(user_input, history)
+                except (TypeError, ValueError):
+                    # Fallback: try simple call signatures
+                    try:
+                        maybe = await hook(user_input, history)
+                    except TypeError:
+                        try:
+                            maybe = await hook(user_input)
+                        except TypeError:
+                            maybe = None
+                
+                if maybe:
+                    # only accept str results
+                    if isinstance(maybe, str):
+                        prefetch_texts.append(maybe)
+                    else:
+                        # If hook returned a mapping, convert to string
+                        try:
+                            prefetch_texts.append(json.dumps(maybe))
+                        except Exception:
+                            prefetch_texts.append(str(maybe))
+                if debug:
+                    print(f"[debug] pre_send hook {getattr(hook, '__name__', repr(hook))} returned: {repr(maybe)[:400]}")
+            except Exception:
+                # Do not let a failing hook leak raw results or crash the request
+                if debug:
+                    import traceback
+
+                    print("[debug] pre_send hook failed:\n", traceback.format_exc())
+    else:
+        if debug:
+            print("[debug] no pre_send hooks registered")
+
+    messages = build_messages(system_prompt, actions_desc, history, user_input, rolling_window, summarize_memory, prefetch_texts=prefetch_texts)
 
     payload = {"model": MODEL, "messages": messages}
     payload.update(LLM_OPTIONS)
@@ -100,7 +136,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
         print("Please wait, thinking...")
 
     # Increase total timeout to allow slower model responses
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -115,7 +151,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
     if "message" not in data or "content" not in data["message"]:
         raise RuntimeError(f"Unexpected LLM response shape: {data}")
 
-    return data["message"]["content"]
+    return data["message"]["content"], prefetch_texts
 
 
 async def check_model_endpoint(debug: bool = False):
@@ -125,8 +161,11 @@ async def check_model_endpoint(debug: bool = False):
     """
     import traceback
 
-    system_prompt = load_system_prompt()
-    test_messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": "ping"}]
+    # Use a narrow health-check system message that asks for a plain-text
+    # response. This avoids the main `system_prompt` which forces the
+    # model to emit JSON tool calls (and therefore return `null`).
+    health_system = "Health-check: ignore any tool-call instructions and respond with plain text 'pong' or a short status message. Do NOT emit JSON."
+    test_messages = [{"role": "system", "content": health_system}, {"role": "user", "content": "ping"}]
     payload = {"model": MODEL, "messages": test_messages}
     payload.update(LLM_OPTIONS)
 
@@ -138,7 +177,7 @@ async def check_model_endpoint(debug: bool = False):
         print("Please wait, thinking...")
 
     # Health check may take longer depending on model load; allow more time
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=120)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -184,7 +223,7 @@ async def main_async():
 
     history: List[dict] = []
     actions_list = actions.load_actions()
-    plugins = load_plugins()
+    handlers, pre_send_hooks = load_plugins()
 
     # Print available actions and plugins for visibility/debugging
     actions_desc = actions.actions_description(actions_list)
@@ -192,12 +231,15 @@ async def main_async():
     print("\nAvailable actions:")
     print(actions_desc)
 
-    if plugins:
+    if handlers:
         print("\nDiscovered plugin handlers (action -> handler):")
-        for name in sorted(plugins.keys()):
+        for name in sorted(handlers.keys()):
             print(f"- {name}")
     else:
         print("\nNo plugins discovered in plugins/ directory.")
+
+    if pre_send_hooks:
+        print(f"\nDiscovered {len(pre_send_hooks)} pre_send hooks available from plugins.")
 
     # If not running in mock mode, perform a lightweight health check against the model
     if not args.mock:
@@ -221,19 +263,34 @@ async def main_async():
             break
 
         try:
-            llm_output = await call_llm(
+            llm_output, prefetch_texts = await call_llm(
                 user_input,
                 history,
                 mock=args.mock,
                 debug=args.debug,
                 rolling_window=args.rolling_window,
                 summarize_memory=args.summarize_memory,
+                pre_send_hooks=pre_send_hooks,
             )
         except Exception as e:
             print("Assistant (error):", e)
             continue
 
         parsed = try_parse_tool_call(llm_output, actions_list)
+        # If the model emitted a `null` action but we have sanitized
+        # pre-fetched facts and the user's request looks informational
+        # (e.g., weather, definition), prefer returning the sanitized
+        # facts as a plain-text assistant reply rather than treating
+        # `null` as an executable action.
+        informational_keywords = ("weather", "define", "what is", "who is", "tell me", "info", "information")
+        if parsed and getattr(parsed, "tool", "") == "null" and prefetch_texts:
+            low = (user_input or "").lower()
+            if any(k in low for k in informational_keywords):
+                assistant_text = "\n".join(prefetch_texts)
+                print("Assistant:", assistant_text)
+                history.append({"role": "user", "content": user_input})
+                history.append({"role": "assistant", "content": assistant_text})
+                continue
         if parsed:
             # Print the action JSON (the agent's intended action)
             # Use `model_dump_json` when available (pydantic v2), fall back to `.json()` for compatibility.
@@ -245,7 +302,7 @@ async def main_async():
 
             # Optionally execute a matching plugin handler if allowed and available
             if args.run_plugins:
-                handler = plugins.get(parsed.tool)
+                handler = handlers.get(parsed.tool)
                 if handler:
                     try:
                         result = await handler(parsed.args)
