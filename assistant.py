@@ -36,7 +36,7 @@ def build_messages(system_prompt: str, actions_desc: str, history: List[dict], u
     return msgs
 
 
-async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> str:
+async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False) -> str:
     if mock:
         # Simple mock: if user asks to get time, return a tool call
         if "time" in user_input.lower():
@@ -52,7 +52,15 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> 
     payload = {"model": MODEL, "messages": messages}
     payload.update(LLM_OPTIONS)
 
-    timeout = aiohttp.ClientTimeout(total=15)
+    if debug:
+        try:
+            print("[debug] LLM payload:", json.dumps(payload, indent=2))
+        except Exception:
+            print("[debug] (could not serialize payload)")
+        print("Please wait, thinking...")
+
+    # Increase total timeout to allow slower model responses
+    timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -61,7 +69,8 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> 
                     raise RuntimeError(f"LLM returned status {resp.status}: {text}")
                 data = await resp.json()
         except Exception as e:
-            raise RuntimeError(f"LLM request failed: {e}")
+            import traceback
+            raise RuntimeError(f"LLM request failed: {e!r}\n{traceback.format_exc()}")
 
     if "message" not in data or "content" not in data["message"]:
         raise RuntimeError(f"Unexpected LLM response shape: {data}")
@@ -69,14 +78,27 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> 
     return data["message"]["content"]
 
 
-async def check_model_endpoint():
-    """Send a small ping to the LLM endpoint and return (success: bool, info: str)."""
+async def check_model_endpoint(debug: bool = False):
+    """Send a small ping to the LLM endpoint and return (success: bool, info: str).
+
+    If `debug` is True, the JSON payload and detailed exception traceback will be printed/returned.
+    """
+    import traceback
+
     system_prompt = load_system_prompt()
     test_messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": "ping"}]
     payload = {"model": MODEL, "messages": test_messages}
     payload.update(LLM_OPTIONS)
 
-    timeout = aiohttp.ClientTimeout(total=8)
+    if debug:
+        try:
+            print("[debug] LLM health-check payload:", json.dumps(payload, indent=2))
+        except Exception:
+            print("[debug] (could not serialize health-check payload)")
+        print("Please wait, thinking...")
+
+    # Health check may take longer depending on model load; allow more time
+    timeout = aiohttp.ClientTimeout(total=30)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -88,7 +110,8 @@ async def check_model_endpoint():
                 except Exception as e:
                     return False, f"invalid json response: {e} / body={text}"
     except Exception as e:
-        return False, str(e)
+        tb = traceback.format_exc()
+        return False, tb
 
     if "message" not in data or "content" not in data["message"]:
         return False, f"unexpected response shape: {data}"
@@ -114,6 +137,7 @@ async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
     parser.add_argument("--run-plugins", action="store_true", help="Allow executing discovered plugins for validated actions")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output for LLM requests")
     args = parser.parse_args()
 
     history: List[dict] = []
@@ -155,7 +179,7 @@ async def main_async():
             break
 
         try:
-            llm_output = await call_llm(user_input, history, mock=args.mock)
+            llm_output = await call_llm(user_input, history, mock=args.mock, debug=args.debug)
         except Exception as e:
             print("Assistant (error):", e)
             continue
