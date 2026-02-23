@@ -50,3 +50,44 @@ Contributing
 Notes
 - The agent uses a rolling context window (last few exchanges) to provide short-term memory.
 - The agent will never execute actions itself; it prints validated action JSON. Build a separate runner to consume and safely execute those actions.
+
+CLI Flags
+- `--mock`: Run with a simple local mock LLM (useful for testing without a model endpoint).
+- `--run-plugins`: Allow executing discovered plugins for validated actions (optional; disabled by default).
+- `--debug`: Enable debug output; prints the full LLM payload and tracebacks on error.
+- `--rolling-window N`: Include up to N recent exchanges (user+assistant pairs) in the context sent to the model. Default is 5.
+- `--summarize-memory`: Enable a local memory summarizer that condenses recent exchanges into a short summary included in the prompt (disabled by default).
+
+Examples
+Run with mock LLM and plugin execution (safe for debugging):
+```bash
+python assistant.py --mock --run-plugins
+```
+
+Run with the real LLM, 3-exchange context and memory summarization enabled:
+```bash
+python assistant.py --rolling-window 3 --summarize-memory --run-plugins --debug
+```
+
+Plugin example
+--------------
+Create a file `plugins/console_plugin.py` with the following contents:
+
+```py
+def register():
+	async def turn_on_light(args: dict):
+		room = args.get("room", "unknown")
+		print(f"[console_plugin] ACTION: turn_on_light -> room={room}")
+		return {"status": "printed", "message": f"turned on {room}"}
+
+	return {"turn_on_light": turn_on_light}
+```
+
+Run the agent (mock or real) and enable plugin execution:
+
+```bash
+python assistant.py --run-plugins --mock
+```
+
+The agent will validate model outputs against `actions.json` and call
+the matching plugin handler when `--run-plugins` is provided.

@@ -1,14 +1,26 @@
+"""Lightweight, local memory summarizer.
+
+The summarizer converts recent user/assistant exchanges into short,
+human-friendly sentences so that small models can more reliably use
+the content when answering memory-related questions. It is intentionally
+simple (no external LLM calls) so it remains fast and deterministic.
+"""
+
 from typing import List
 import json
 
 
 def summarize(history: List[dict], rolling_window: int, max_chars: int = 600) -> str:
-    """
-    Produce a human-friendly summary of the most recent exchanges.
+    """Produce a concise, human-readable summary of recent exchanges.
 
-    The summarizer converts recent user/assistant pairs into short sentences
-    (e.g. "User asked X. Assistant emitted action Y with args Z.") so the LLM
-    can read and use the memory more reliably.
+    The function takes the most recent `rolling_window` exchanges
+    (each exchange is a user message + assistant reply) and converts
+    them into sentences such as:
+
+      "User: turn off the lights in the bedroom. Assistant emitted action null (room=bedroom)."
+
+    This format is easier for small models to parse and reason about
+    than raw JSON blobs.
     """
     # take the last rolling_window * 2 messages (user + assistant pairs)
     start = max(0, len(history) - (rolling_window * 2))

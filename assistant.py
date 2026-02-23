@@ -34,6 +34,23 @@ def build_messages(
     system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
 
     msgs = [{"role": "system", "content": system_content}]
+"""Async REPL agent for generating JSON-encoded actions from an LLM.
+
+This module implements a small command-line agent that sends user inputs
+to a locally running LLM (e.g. Ollama) and expects either a plain-text
+response or a JSON-formatted tool invocation from the model. Tool
+invocations are validated against `actions.json` and may optionally be
+executed by plugins discovered in `plugins/`.
+
+Key responsibilities:
+- Build structured messages for the LLM including a system prompt,
+  a short rolling context of previous exchanges, and an optional
+  memory summary.
+- Call the LLM asynchronously via HTTP and handle errors/timeouts.
+- Validate any JSON tool calls using pydantic models in `actions.py`.
+- Optionally load and run discovered plugin handlers for actions.
+"""
+
 
     # Optionally include a memory summary as a system-level note
     if summarize_memory and history:
