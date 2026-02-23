@@ -9,6 +9,7 @@ import aiohttp
 from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
 import actions
 from plugin_loader import load_plugins
+import memory_summarizer
 
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
@@ -21,22 +22,44 @@ def load_system_prompt() -> str:
         return f.read()
 
 
-def build_messages(system_prompt: str, actions_desc: str, history: List[dict], user_input: str) -> List[dict]:
+def build_messages(
+    system_prompt: str,
+    actions_desc: str,
+    history: List[dict],
+    user_input: str,
+    rolling_window: int,
+    summarize_memory: bool = False,
+) -> List[dict]:
     # Compose system prompt with a description of available actions
     system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
 
     msgs = [{"role": "system", "content": system_content}]
 
+    # Optionally include a memory summary as a system-level note
+    if summarize_memory and history:
+        summary = memory_summarizer.summarize(history, rolling_window)
+        msgs.append({"role": "system", "content": "Memory summary: " + summary})
+
     # Include rolling history (already formatted as role/content dicts)
-    start = max(0, len(history) - (ROLLING_WINDOW * 2))
-    msgs.extend(history[start:])
+    start = max(0, len(history) - (rolling_window * 2))
+    # Ensure message contents are strings when sent to the LLM
+    for m in history[start:]:
+        content = m.get("content")
+        if isinstance(content, dict):
+            try:
+                content_str = json.dumps(content)
+            except Exception:
+                content_str = str(content)
+        else:
+            content_str = str(content)
+        msgs.append({"role": m.get("role", "user"), "content": content_str})
 
     # Add current user input
     msgs.append({"role": "user", "content": user_input})
     return msgs
 
 
-async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False) -> str:
+async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False, rolling_window: int = 5, summarize_memory: bool = False) -> str:
     if mock:
         # Simple mock: if user asks to get time, return a tool call
         if "time" in user_input.lower():
@@ -47,7 +70,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
     actions_list = actions.load_actions()
     actions_desc = actions.actions_description(actions_list)
 
-    messages = build_messages(system_prompt, actions_desc, history, user_input)
+    messages = build_messages(system_prompt, actions_desc, history, user_input, rolling_window, summarize_memory)
 
     payload = {"model": MODEL, "messages": messages}
     payload.update(LLM_OPTIONS)
@@ -60,7 +83,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
         print("Please wait, thinking...")
 
     # Increase total timeout to allow slower model responses
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -138,6 +161,8 @@ async def main_async():
     parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
     parser.add_argument("--run-plugins", action="store_true", help="Allow executing discovered plugins for validated actions")
     parser.add_argument("--debug", action="store_true", help="Enable debug output for LLM requests")
+    parser.add_argument("--rolling-window", type=int, default=ROLLING_WINDOW, help="Number of recent exchanges to include in context (user+assistant pairs)")
+    parser.add_argument("--summarize-memory", action="store_true", help="Enable memory summarization of recent exchanges before sending to the LLM")
     args = parser.parse_args()
 
     history: List[dict] = []
@@ -159,7 +184,7 @@ async def main_async():
 
     # If not running in mock mode, perform a lightweight health check against the model
     if not args.mock:
-        ok, info = await check_model_endpoint()
+        ok, info = await check_model_endpoint(debug=args.debug)
         if ok:
             print("\nLLM check OK. Sample response:", info)
         else:
@@ -179,7 +204,14 @@ async def main_async():
             break
 
         try:
-            llm_output = await call_llm(user_input, history, mock=args.mock, debug=args.debug)
+            llm_output = await call_llm(
+                user_input,
+                history,
+                mock=args.mock,
+                debug=args.debug,
+                rolling_window=args.rolling_window,
+                summarize_memory=args.summarize_memory,
+            )
         except Exception as e:
             print("Assistant (error):", e)
             continue
@@ -206,15 +238,16 @@ async def main_async():
                 else:
                     print(f"No plugin registered for action '{parsed.tool}'")
 
-            # Save assistant reply (the JSON) in history
-            history.append({"role": "assistant", "content": parsed_json})
+            # Save the user message then assistant reply in chronological order
             history.append({"role": "user", "content": user_input})
+            history.append({"role": "assistant", "content": parsed_json})
             continue
 
         # Not a tool call: normal assistant reply
         print("Assistant:", llm_output)
-        history.append({"role": "assistant", "content": llm_output})
+        # Save the user message then assistant reply in chronological order
         history.append({"role": "user", "content": user_input})
+        history.append({"role": "assistant", "content": llm_output})
 
 
 def main():
