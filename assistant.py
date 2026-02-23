@@ -69,6 +69,33 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> 
     return data["message"]["content"]
 
 
+async def check_model_endpoint():
+    """Send a small ping to the LLM endpoint and return (success: bool, info: str)."""
+    system_prompt = load_system_prompt()
+    test_messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": "ping"}]
+    payload = {"model": MODEL, "messages": test_messages}
+    payload.update(LLM_OPTIONS)
+
+    timeout = aiohttp.ClientTimeout(total=8)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(OLLAMA_URL, json=payload) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    return False, f"status={resp.status} body={text}"
+                try:
+                    data = await resp.json()
+                except Exception as e:
+                    return False, f"invalid json response: {e} / body={text}"
+    except Exception as e:
+        return False, str(e)
+
+    if "message" not in data or "content" not in data["message"]:
+        return False, f"unexpected response shape: {data}"
+
+    return True, data["message"]["content"]
+
+
 def try_parse_tool_call(llm_output: str, actions_list: List[actions.ActionSpec]):
     try:
         parsed = json.loads(llm_output)
@@ -105,6 +132,20 @@ async def main_async():
             print(f"- {name}")
     else:
         print("\nNo plugins discovered in plugins/ directory.")
+
+    # If not running in mock mode, perform a lightweight health check against the model
+    if not args.mock:
+        ok, info = await check_model_endpoint()
+        if ok:
+            print("\nLLM check OK. Sample response:", info)
+        else:
+            print("\nLLM check failed:", info)
+            ans = await ainput("Continue without LLM (you can use --mock)? (y/N): ")
+            if ans.strip().lower() not in ("y", "yes"):
+                print("Exiting due to failed LLM health check.")
+                return
+    else:
+        print("\nSkipping LLM health check because --mock was provided.")
 
     while True:
         try:
