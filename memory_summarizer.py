@@ -4,29 +4,51 @@ import json
 
 def summarize(history: List[dict], rolling_window: int, max_chars: int = 600) -> str:
     """
-    Produce a minimal summary of the most recent exchanges.
+    Produce a human-friendly summary of the most recent exchanges.
 
-    This is a lightweight, local summarizer used to compress memory before
-    sending to the model. It simply concatenates the last N exchanges into
-    a short text blob and truncates to `max_chars`.
+    The summarizer converts recent user/assistant pairs into short sentences
+    (e.g. "User asked X. Assistant emitted action Y with args Z.") so the LLM
+    can read and use the memory more reliably.
     """
     # take the last rolling_window * 2 messages (user + assistant pairs)
     start = max(0, len(history) - (rolling_window * 2))
     recent = history[start:]
 
-    parts = []
-    for m in recent:
-        role = m.get("role", "")
-        content = m.get("content", "")
-        if isinstance(content, dict):
-            try:
-                content = json.dumps(content)
-            except Exception:
-                content = str(content)
-        parts.append(f"{role}: {content}")
+    sentences = []
+    # iterate in pairs (user then assistant)
+    i = 0
+    while i < len(recent):
+        user_msg = recent[i]
+        assistant_msg = recent[i + 1] if i + 1 < len(recent) else None
 
-    joined = " \n ".join(parts)
+        utext = str(user_msg.get("content", "")).strip()
+        # Normalize assistant content
+        acontent = assistant_msg.get("content") if assistant_msg else None
+        if isinstance(acontent, dict):
+            try:
+                atext = json.dumps(acontent)
+            except Exception:
+                atext = str(acontent)
+        else:
+            atext = str(acontent) if acontent is not None else ""
+
+        # If assistant content looks like a tool call JSON, try to parse
+        try:
+            parsed = json.loads(atext) if atext else None
+        except Exception:
+            parsed = None
+
+        if parsed and isinstance(parsed, dict) and "tool" in parsed:
+            tool = parsed.get("tool")
+            args = parsed.get("args", {})
+            args_str = ", ".join(f"{k}={v}" for k, v in args.items()) if args else "no args"
+            sentences.append(f"User: {utext}. Assistant emitted action {tool} ({args_str}).")
+        else:
+            sentences.append(f"User: {utext}. Assistant: {atext}.")
+
+        i += 2
+
+    joined = " \n ".join(sentences)
     if len(joined) <= max_chars:
         return joined
-    # truncate cleanly
     return joined[: max_chars - 3] + "..."
