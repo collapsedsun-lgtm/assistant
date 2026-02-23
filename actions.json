@@ -1,6 +1,11 @@
 {
   "actions": [
     {
+      "name": "null",
+      "description": "No operation. Use this when no action should be taken or when unsure.",
+      "args": {}
+    },
+    {
       "name": "get_time",
       "description": "Return the current local time.",
       "args": {}
