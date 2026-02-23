@@ -11,6 +11,7 @@ from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
 import actions
 from plugin_loader import load_plugins
 import memory_summarizer
+import web_sanitizer
 
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
@@ -21,6 +22,17 @@ def load_system_prompt() -> str:
     path = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def load_settings() -> dict:
+    path = os.path.join(os.path.dirname(__file__), "settings.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def build_messages(
@@ -80,19 +92,24 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
 
     # Run pre-send hooks (they should fetch and sanitize web data before returning strings)
     prefetch_texts: List[str] = []
+    settings = load_settings()
     if pre_send_hooks:
         for hook in pre_send_hooks:
             try:
-                # Try calling the hook with a `debug` flag when supported.
                 maybe = None
                 try:
                     sig = inspect.signature(hook)
-                    if len(sig.parameters) >= 3:
-                        maybe = await hook(user_input, history, debug)
-                    else:
-                        maybe = await hook(user_input, history)
-                except (TypeError, ValueError):
-                    # Fallback: try simple call signatures
+                    # Build kwargs: pass debug and settings when supported by the hook
+                    kwargs = {}
+                    params = sig.parameters
+                    if "debug" in params:
+                        kwargs["debug"] = debug
+                    if "settings" in params or "config" in params:
+                        kwargs["settings"] = settings
+
+                    maybe = await hook(user_input, history, **kwargs)
+                except Exception:
+                    # Fallback to simpler call signatures
                     try:
                         maybe = await hook(user_input, history)
                     except TypeError:
@@ -100,7 +117,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
                             maybe = await hook(user_input)
                         except TypeError:
                             maybe = None
-                
+
                 if maybe:
                     # only accept str results
                     if isinstance(maybe, str):
@@ -286,7 +303,14 @@ async def main_async():
         if parsed and getattr(parsed, "tool", "") == "null" and prefetch_texts:
             low = (user_input or "").lower()
             if any(k in low for k in informational_keywords):
-                assistant_text = "\n".join(prefetch_texts)
+                # Convert weather snippets into human-friendly sentences
+                friendly = []
+                for p in prefetch_texts:
+                    if isinstance(p, str) and p.lower().startswith("weather (sanitized):"):
+                        friendly.append(web_sanitizer.humanize_weather(p))
+                    else:
+                        friendly.append(p)
+                assistant_text = "\n".join(friendly)
                 print("Assistant:", assistant_text)
                 history.append({"role": "user", "content": user_input})
                 history.append({"role": "assistant", "content": assistant_text})

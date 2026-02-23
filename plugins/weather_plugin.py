@@ -16,7 +16,7 @@ from urllib.parse import quote_plus
 from web_sanitizer import fetch_and_sanitize
 
 
-async def _prefetch_weather(user_input: str, history, debug: bool = False) -> Optional[str]:
+async def _prefetch_weather(user_input: str, history, debug: bool = False, settings: Optional[dict] = None) -> Optional[str]:
     low = (user_input or "").lower()
     if "weather" not in low:
         return None
@@ -34,6 +34,15 @@ async def _prefetch_weather(user_input: str, history, debug: bool = False) -> Op
                 city = candidate
         except Exception:
             city = None
+
+    # If no city was parsed, try default from settings
+    if not city and settings:
+        try:
+            default = settings.get("default_location")
+            if default:
+                city = default
+        except Exception:
+            pass
 
     # Use wttr.in (text) for a quick example; the sanitizer will strip
     # anything unsafe. In production you may prefer a structured API.

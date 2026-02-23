@@ -109,3 +109,104 @@ def sanitize_snippet(snippet: str, max_chars: int = 800) -> str:
     an LLM system message.
     """
     return _sanitize_text(snippet, max_chars=max_chars)
+
+
+def humanize_weather(snippet: str) -> str:
+    """Convert a terse weather snippet (from wttr.in style) into a
+    human-friendly sentence suitable for TTS.
+
+    Example input: "bristol: 🌫 +10°C" -> "In Bristol it's foggy and 10°C."
+    The function is conservative and returns a readable fallback when
+    parsing fails.
+    """
+    if not snippet:
+        return "I don't have weather information right now."
+
+    s = snippet.strip()
+
+    # Remove leading 'Weather (sanitized):' if present
+    if s.lower().startswith("weather (sanitized):"):
+        s = s[len("weather (sanitized):") :].strip()
+
+    # Try to split city and rest
+    parts = s.split(":", 1)
+    if len(parts) == 2:
+        city, rest = parts[0].strip(), parts[1].strip()
+    else:
+        city, rest = None, parts[0].strip()
+
+    # Map common weather emojis to words
+    emoji_map = {
+        "🌫": "foggy",
+        "🌁": "foggy",
+        "🌧": "rainy",
+        "☔": "rainy",
+        "☀": "sunny",
+        "☀️": "sunny",
+        "🌤": "partly sunny",
+        "⛈": "thunderstorms",
+        "🌩": "thunderstorms",
+        "❄️": "snowy",
+        "🌨": "snowy",
+        "🌬": "windy",
+        "💨": "windy",
+    }
+
+    # Find temperature (e.g., +10°C or 10 C)
+    temp = None
+    import re
+
+    m = re.search(r"([+-]?\d{1,3})\s*°?\s*C", rest, re.I)
+    if m:
+        temp = m.group(1)
+    else:
+        # Try to find a bare number
+        m2 = re.search(r"([+-]?\d{1,3})\b", rest)
+        if m2:
+            temp = m2.group(1)
+
+    # Find first emoji present
+    weather_word = None
+    for ch in rest:
+        if ch in emoji_map:
+            weather_word = emoji_map[ch]
+            break
+
+    # If no emoji, try to find words like 'fog', 'rain', 'wind'
+    low = rest.lower()
+    if not weather_word:
+        if "fog" in low or "mist" in low:
+            weather_word = "foggy"
+        elif "rain" in low or "showers" in low:
+            weather_word = "rainy"
+        elif "sun" in low or "clear" in low:
+            weather_word = "sunny"
+        elif "snow" in low:
+            weather_word = "snowy"
+        elif "wind" in low:
+            weather_word = "windy"
+
+    # Build human-friendly sentence
+    parts = []
+    if city:
+        parts.append(f"In {city.capitalize()}")
+
+    if weather_word:
+        if city:
+            parts.append(f"it's {weather_word}")
+        else:
+            parts.append(f"it's {weather_word}")
+
+    if temp is not None:
+        parts.append(f"and the temperature is {temp}°C")
+
+    if not parts:
+        # fallback to the raw rest text but cleaned
+        return rest
+
+    sentence = " ".join(parts).strip()
+    # Ensure punctuation
+    if not sentence.endswith("."):
+        sentence = sentence + "."
+
+    return sentence
