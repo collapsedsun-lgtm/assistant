@@ -86,13 +86,25 @@ async def ainput(prompt: str = "") -> str:
 async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
+    parser.add_argument("--run-plugins", action="store_true", help="Allow executing discovered plugins for validated actions")
     args = parser.parse_args()
 
     history: List[dict] = []
     actions_list = actions.load_actions()
     plugins = load_plugins()
 
+    # Print available actions and plugins for visibility/debugging
+    actions_desc = actions.actions_description(actions_list)
     print("Starting async agent REPL (type Ctrl-C to exit).\nActions are only emitted as JSON; this program will not execute them.")
+    print("\nAvailable actions:")
+    print(actions_desc)
+
+    if plugins:
+        print("\nDiscovered plugin handlers (action -> handler):")
+        for name in sorted(plugins.keys()):
+            print(f"- {name}")
+    else:
+        print("\nNo plugins discovered in plugins/ directory.")
 
     while True:
         try:
@@ -109,8 +121,21 @@ async def main_async():
 
         parsed = try_parse_tool_call(llm_output, actions_list)
         if parsed:
-            # Do not execute plugins here by default; just show the action JSON
+            # Print the action JSON (the agent's intended action)
             print("Assistant (action):", parsed.json())
+
+            # Optionally execute a matching plugin handler if allowed and available
+            if args.run_plugins:
+                handler = plugins.get(parsed.tool)
+                if handler:
+                    try:
+                        result = await handler(parsed.args)
+                        print("Plugin result:", result)
+                    except Exception as e:
+                        print("Plugin execution error:", e)
+                else:
+                    print(f"No plugin registered for action '{parsed.tool}'")
+
             # Save assistant reply (the JSON) in history
             history.append({"role": "assistant", "content": parsed.json()})
             history.append({"role": "user", "content": user_input})
