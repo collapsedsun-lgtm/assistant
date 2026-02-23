@@ -1,12 +1,14 @@
 import argparse
+import asyncio
 import json
 import os
-import requests
-from datetime import datetime
-from typing import List, Dict
+from typing import List
+
+import aiohttp
 
 from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
 import actions
+from plugin_loader import load_plugins
 
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
@@ -19,7 +21,7 @@ def load_system_prompt() -> str:
         return f.read()
 
 
-def build_messages(system_prompt: str, actions_desc: str, history: List[Dict], user_input: str) -> List[Dict]:
+def build_messages(system_prompt: str, actions_desc: str, history: List[dict], user_input: str) -> List[dict]:
     # Compose system prompt with a description of available actions
     system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
 
@@ -34,7 +36,7 @@ def build_messages(system_prompt: str, actions_desc: str, history: List[Dict], u
     return msgs
 
 
-def call_llm(user_input: str, history: List[Dict], mock: bool = False) -> str:
+async def call_llm(user_input: str, history: List[dict], mock: bool = False) -> str:
     if mock:
         # Simple mock: if user asks to get time, return a tool call
         if "time" in user_input.lower():
@@ -50,62 +52,67 @@ def call_llm(user_input: str, history: List[Dict], mock: bool = False) -> str:
     payload = {"model": MODEL, "messages": messages}
     payload.update(LLM_OPTIONS)
 
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=10)
-    except requests.RequestException as e:
-        raise RuntimeError(f"LLM request failed: {e}")
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            async with session.post(OLLAMA_URL, json=payload) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"LLM returned status {resp.status}: {text}")
+                data = await resp.json()
+        except Exception as e:
+            raise RuntimeError(f"LLM request failed: {e}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"LLM returned status {resp.status_code}: {resp.text}")
-
-    data = resp.json()
     if "message" not in data or "content" not in data["message"]:
         raise RuntimeError(f"Unexpected LLM response shape: {data}")
 
     return data["message"]["content"]
 
 
-def try_parse_tool_call(llm_output: str, actions_list: List[Dict]):
+def try_parse_tool_call(llm_output: str, actions_list: List[actions.ActionSpec]):
     try:
         parsed = json.loads(llm_output)
     except json.JSONDecodeError:
         return None
 
-    if actions.validate_tool_call(parsed, actions_list):
-        return parsed
-    return None
+    return actions.validate_tool_call(parsed, actions_list)
 
 
-def main():
+async def ainput(prompt: str = "") -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, input, prompt)
+
+
+async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
     args = parser.parse_args()
 
-    history: List[Dict] = []
+    history: List[dict] = []
     actions_list = actions.load_actions()
+    plugins = load_plugins()
 
-    print("Starting agent REPL (type Ctrl-C to exit).\nActions are only emitted as JSON; this program will not execute them.")
+    print("Starting async agent REPL (type Ctrl-C to exit).\nActions are only emitted as JSON; this program will not execute them.")
 
     while True:
         try:
-            user_input = input("You: ")
+            user_input = await ainput("You: ")
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye")
             break
 
         try:
-            llm_output = call_llm(user_input, history, mock=args.mock)
+            llm_output = await call_llm(user_input, history, mock=args.mock)
         except Exception as e:
             print("Assistant (error):", e)
             continue
 
-        # Try to parse JSON tool call
         parsed = try_parse_tool_call(llm_output, actions_list)
         if parsed:
-            # Do not execute — just print the action JSON so a separate runner can act on it
-            print("Assistant (action):", json.dumps(parsed))
+            # Do not execute plugins here by default; just show the action JSON
+            print("Assistant (action):", parsed.json())
             # Save assistant reply (the JSON) in history
-            history.append({"role": "assistant", "content": json.dumps(parsed)})
+            history.append({"role": "assistant", "content": parsed.json()})
             history.append({"role": "user", "content": user_input})
             continue
 
@@ -113,6 +120,10 @@ def main():
         print("Assistant:", llm_output)
         history.append({"role": "assistant", "content": llm_output})
         history.append({"role": "user", "content": user_input})
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
