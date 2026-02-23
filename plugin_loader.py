@@ -20,7 +20,7 @@ from typing import Dict, Callable, Awaitable, Any, List, Tuple
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 
 
-def load_plugins() -> Tuple[Dict[str, Callable[[dict], Awaitable[Any]]], List[Callable]]:
+def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict], Awaitable[Any]]], List[Callable]]:
     """Discover and load plugin handlers and optional hooks.
 
     Returns a tuple `(handlers, pre_send_hooks)` where `handlers` maps
@@ -66,18 +66,26 @@ def load_plugins() -> Tuple[Dict[str, Callable[[dict], Awaitable[Any]]], List[Ca
             try:
                 regs = register()
                 if isinstance(regs, dict):
-                    # New style: {'actions': {...}, 'pre_send': [callables]}
+                    # New style: {'actions': {...}, 'pre_send': [callables], 'provider': 'name'}
+                    provider = regs.get("provider")
                     if "actions" in regs and isinstance(regs["actions"], dict):
                         handlers.update(regs["actions"])
                     # Legacy style: top-level mapping of actions
                     elif all(callable(v) for v in regs.values()):
                         handlers.update(regs)
 
-                    # Optional pre_send hooks
+                    # Optional pre_send hooks: include only if provider matches settings (when provided)
                     if "pre_send" in regs and isinstance(regs["pre_send"], list):
-                        for h in regs["pre_send"]:
-                            if callable(h):
-                                pre_send_hooks.append(h)
+                        include = True
+                        if settings and provider:
+                            # If settings has a weather_provider (or generic provider) preference, honor it
+                            pref = settings.get("weather_provider") or settings.get("provider")
+                            if pref and str(pref).lower() != str(provider).lower():
+                                include = False
+                        if include:
+                            for h in regs["pre_send"]:
+                                if callable(h):
+                                    pre_send_hooks.append(h)
                 # If register returned a tuple (compatibility), try to unpack
                 elif isinstance(regs, tuple) and len(regs) == 2:
                     a, hooks = regs

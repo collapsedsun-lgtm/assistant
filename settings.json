@@ -1,4 +1,5 @@
 {
   "default_location": "Bristol",
-  "default_temperature_unit": "Celsius"
+  "default_temperature_unit": "Celsius",
+  "weather_provider": "open_meteo"
 }
