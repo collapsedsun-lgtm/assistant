@@ -91,3 +91,11 @@ python assistant.py --run-plugins --mock
 
 The agent will validate model outputs against `actions.json` and call
 the matching plugin handler when `--run-plugins` is provided.
+
+Commercial licensing
+--------------------
+This project is licensed under the GNU Affero General Public License v3
+(AGPL-3.0). If you wish to use this code in a commercial product but do
+not want to comply with the AGPL terms (for example, to avoid releasing
+source for a hosted service), commercial licensing may be available on
+request. Contact the repository owner for details.
