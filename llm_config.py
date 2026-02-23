@@ -5,8 +5,8 @@ MODEL = "gemma:2b"
 LLM_OPTIONS = {
     "stream": False,
     "options": {
-        "temperature": 0.1,
+        "temperature": 0.0,
         "top_p": 0.9,
-        "num_predict": 150
+        "num_predict": 80
     }
 }
