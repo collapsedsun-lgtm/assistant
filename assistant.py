@@ -402,12 +402,26 @@ async def check_model_endpoint(debug: bool = False):
 
 
 def try_parse_tool_call(llm_output: str, actions_list: List[actions.ActionSpec]):
+    # Be permissive: the model may include extra text around the JSON
+    # tool call (or prefixes like model names). Try direct parse first,
+    # then search for a JSON object substring.
     try:
         parsed = json.loads(llm_output)
-    except json.JSONDecodeError:
-        return None
+        return actions.validate_tool_call(parsed, actions_list)
+    except Exception:
+        pass
 
-    return actions.validate_tool_call(parsed, actions_list)
+    # Attempt to find first {...} JSON object in the output
+    start = llm_output.find("{")
+    end = llm_output.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = llm_output[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+        return actions.validate_tool_call(parsed, actions_list)
+    except Exception:
+        return None
 
 
 async def ainput(prompt: str = "") -> str:
@@ -424,6 +438,13 @@ async def main_async():
     parser.add_argument("--summarize-memory", action="store_true", help="Enable memory summarization of recent exchanges before sending to the LLM")
     parser.add_argument("--show-settings", action="store_true", help="Print effective LLM and cache settings and exit")
     args = parser.parse_args()
+    # Allow enabling plugin execution by default via settings.json
+    try:
+        settings = load_settings()
+        if not args.run_plugins and isinstance(settings, dict) and settings.get("auto_run_plugins"):
+            args.run_plugins = True
+    except Exception:
+        pass
 
     async def _print_settings_and_exit():
         # Load KV to report backend status
@@ -517,9 +538,11 @@ async def main_async():
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye")
             break
-        # Persist the user's message immediately (write-through) so it becomes
-        # part of memory for subsequent requests and for crash recovery.
-        history.append({"role": "user", "content": user_input})
+        # Persist the user's message to KV immediately (write-through) for
+        # crash recovery, but do NOT append it to the in-memory `history`
+        # before calling the LLM — `build_messages` already adds the
+        # current `user_input` as the final message, and appending it to
+        # `history` causes duplication in the request payload.
         try:
             await kv.rpush(messages_list_key(session_id), json.dumps({"role": "user", "content": user_input}))
         except Exception:
@@ -538,29 +561,77 @@ async def main_async():
             # If a streaming generator was returned, consume it and assemble final text
             if hasattr(llm_output, "__aiter__"):
                 chunks = []
-                print("Assistant:", end=" ", flush=True)
+                cumulative = ""
+                mode = None  # 'maybe_json' or 'text'
+                detected_action = False
                 try:
                     async for part in llm_output:
-                        print(part, end="", flush=True)
-                        chunks.append(part)
+                        # Determine mode from first non-whitespace char of first part
+                        if mode is None:
+                            first_non_ws = None
+                            for ch in part:
+                                if not ch.isspace():
+                                    first_non_ws = ch
+                                    break
+                            if first_non_ws in ("{", "["):
+                                mode = "maybe_json"
+                            else:
+                                mode = "text"
+                                print("Assistant:", end=" ", flush=True)
+
+                        cumulative += part
+
+                        if mode == "text":
+                            # print progressively for text responses
+                            print(part, end="", flush=True)
+                            chunks.append(part)
+                        else:
+                            # buffer JSON-like responses and attempt to parse as a tool call
+                            try:
+                                parsed_check = try_parse_tool_call(cumulative, actions_list)
+                                if parsed_check:
+                                    # Detected a tool-call JSON response; stop streaming and
+                                    # treat this as an action.
+                                    detected_action = True
+                                    # ensure llm_output becomes the JSON string for downstream parsing
+                                    llm_output = cumulative
+                                    break
+                            except Exception:
+                                # not parseable yet; continue buffering
+                                pass
                 except Exception as e:
-                    print("\n[streaming error]:", e)
-                print()
-                final_content = "".join(chunks)
+                    if mode == "text":
+                        print("\n[streaming error]:", e)
+                    else:
+                        print("[streaming error]:", e)
+
+                # If we didn't detect an action and were in JSON-mode, treat cumulative as text
+                if not detected_action:
+                    if mode == "maybe_json":
+                        # print the buffered content as it wasn't a tool-call
+                        print("Assistant:", end=" ", flush=True)
+                        print(cumulative, end="\n", flush=True)
+                        final_content = cumulative
+                    else:
+                        print()  # newline after progressive text
+                        final_content = "".join(chunks)
+
                 # Cache the final streaming response when possible
                 try:
                     sys_prompt = load_system_prompt()
                     msgs_for_cache = build_messages(sys_prompt, actions_desc, history, user_input, args.rolling_window, args.summarize_memory, prefetch_texts=prefetch_texts)
                     messages_json = json.dumps(msgs_for_cache, sort_keys=True)
                     cache_key = response_cache_key(MODEL, LLM_OPTIONS, messages_json)
-                    if kv is not None and cache_key:
+                    if kv is not None and cache_key and not detected_action:
                         try:
-                            await kv.set(cache_key, final_content, ex=60)
+                            await kv.set(cache_key, final_content, ex=FINAL_TTL)
                         except Exception:
                             pass
                 except Exception:
                     pass
-                llm_output = final_content
+
+                if not detected_action:
+                    llm_output = final_content
         except Exception as e:
             print("Assistant (error):", e)
             continue

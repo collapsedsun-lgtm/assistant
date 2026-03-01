@@ -47,6 +47,25 @@ try:
         with open(settings_path, "r", encoding="utf-8") as f:
             _settings = json.load(f)
         if isinstance(_settings, dict):
+            # Allow selecting model and endpoint via settings.json
+            if "model" in _settings:
+                try:
+                    MODEL = str(_settings.get("model"))
+                except Exception:
+                    pass
+            if "ollama_url" in _settings:
+                try:
+                    OLLAMA_URL = str(_settings.get("ollama_url"))
+                except Exception:
+                    pass
+            if "llm_options" in _settings:
+                try:
+                    opt = _settings.get("llm_options")
+                    if isinstance(opt, dict):
+                        # shallow-merge provided options into defaults
+                        LLM_OPTIONS.update(opt)
+                except Exception:
+                    pass
             if "llm_stream" in _settings:
                 try:
                     LLM_STREAM = bool(_settings.get("llm_stream"))

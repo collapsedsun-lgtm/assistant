@@ -1,5 +1,23 @@
 {
   "default_location": "Bristol",
   "default_temperature_unit": "Celsius",
-  "weather_provider": "open_meteo"
+  "weather_provider": "open_meteo",
+  "llm_stream": true,
+
+  "model": "gemma:2b-instruct",
+  "ollama_url": "http://localhost:11434/api/chat",
+  "llm_options": {
+    "stream": false,
+    "options": {
+      "temperature": 0.1,
+      "top_p": 0.9,
+      "num_predict": 150
+    }
+  },
+
+  "partial_ttl": 30,
+  "final_ttl": 60,
+  "partial_save_threshold": 200,
+  "llm_timeout": 300,
+  "auto_run_plugins": true
 }
