@@ -1,12 +1,6 @@
-"""Example plugin that demonstrates a safe pre_send weather fetch.
+"""Weather pre_send hook using wttr.in text output.
 
-This plugin registers a `pre_send` hook which, when the user asks
-about weather, will fetch a public weather page and return a
-sanitized short fact string. All raw HTML is sanitized by
-`web_sanitizer.fetch_and_sanitize` before returning.
-
-The agent will then inject the sanitized string into the prompt; the
-LLM will never see the raw fetched content.
+This is the former `weather_plugin.py` renamed to reflect the service.
 """
 import asyncio
 import re
@@ -55,18 +49,18 @@ async def _prefetch_weather(user_input: str, history, debug: bool = False, setti
 
     for url in urls_to_try:
         if debug:
-            print(f"[debug] weather_plugin: trying {url}")
+            print(f"[debug] weather_wttr: trying {url}")
         try:
             sanitized = await fetch_and_sanitize(url, max_chars=300, timeout=5, debug=debug)
             if sanitized:
                 if debug:
-                    print(f"[debug] weather_plugin: sanitized result: {sanitized}")
+                    print(f"[debug] weather_wttr: sanitized result: {sanitized}")
                 return f"Weather (sanitized): {sanitized}"
         except Exception as e:
             if debug:
                 import traceback
 
-                print(f"[debug] weather_plugin exception for {url}: {e!r}\n", traceback.format_exc())
+                print(f"[debug] weather_wttr exception for {url}: {e!r}\n", traceback.format_exc())
             # swallow; try next fallback
             continue
 
@@ -75,4 +69,4 @@ async def _prefetch_weather(user_input: str, history, debug: bool = False, setti
 
 def register():
     # This plugin does not register action handlers, only a pre_send hook.
-    return {"actions": {}, "pre_send": [_prefetch_weather]}
+    return {"actions": {}, "pre_send": [_prefetch_weather], "provider": "wttr"}

@@ -1,5 +1,30 @@
 {
   "default_location": "Bristol",
+  "local_timezone": "Europe/London",
   "default_temperature_unit": "Celsius",
-  "weather_provider": "open_meteo"
+  "ollama_use_session": true,
+  "weather_provider": "open_meteo",
+  "llm_stream": true,
+
+  "model": "gemma:2b-instruct",
+  "ollama_url": "http://localhost:11434/api/chat",
+  "llm_options": {
+    "stream": false,
+    "options": {
+      "temperature": 0.0,
+      "top_p": 0.9,
+      "num_predict": 50
+    }
+  },
+
+  "partial_ttl": 30,
+  "final_ttl": 60,
+  "partial_save_threshold": 200,
+  "llm_timeout": 600,
+  "auto_run_plugins": true,
+  "preferred_plugins": {
+    "get_time": "general_plugin",
+    "turn_on_light": "automation_plugin",
+    "turn_off_light": "automation_plugin"
+  }
 }
