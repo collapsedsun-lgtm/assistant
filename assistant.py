@@ -484,7 +484,8 @@ async def main_async():
 
     history: List[dict] = []
     actions_list = actions.load_actions()
-    handlers, pre_send_hooks = load_plugins()
+    settings = load_settings()
+    handlers, pre_send_hooks = load_plugins(settings)
 
     # Connect to KV and load recent history (if any). Uses a simple default
     # session id; this can be extended later to support per-user sessions.

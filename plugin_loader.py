@@ -32,6 +32,7 @@ def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict
     """
     handlers: Dict[str, Callable[[dict], Awaitable[Any]]] = {}
     pre_send_hooks: List[Callable] = []
+    provider_map: Dict[str, str] = {}
     if not os.path.isdir(PLUGIN_DIR):
         return handlers, pre_send_hooks
 
@@ -67,12 +68,39 @@ def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict
                 regs = register()
                 if isinstance(regs, dict):
                     # New style: {'actions': {...}, 'pre_send': [callables], 'provider': 'name'}
-                    provider = regs.get("provider")
+                    provider = regs.get("provider") or name
+                    actions_map = None
                     if "actions" in regs and isinstance(regs["actions"], dict):
-                        handlers.update(regs["actions"])
+                        actions_map = regs["actions"]
                     # Legacy style: top-level mapping of actions
                     elif all(callable(v) for v in regs.values()):
-                        handlers.update(regs)
+                        actions_map = regs
+
+                    # Merge actions without overwriting existing handlers unless
+                    # the settings explicitly prefer this provider for the action.
+                    if actions_map:
+                        pref_map = {}
+                        if settings and isinstance(settings.get("preferred_plugins"), dict):
+                            pref_map = settings.get("preferred_plugins")
+                        for act_name, handler_fn in actions_map.items():
+                            if not callable(handler_fn):
+                                continue
+                            preferred = pref_map.get(act_name)
+                            if act_name in handlers:
+                                existing_provider = provider_map.get(act_name, "(unknown)")
+                                # If settings prefer this provider, overwrite; otherwise error and exit
+                                if preferred and str(preferred).lower() == str(provider).lower():
+                                    handlers[act_name] = handler_fn
+                                    provider_map[act_name] = provider
+                                else:
+                                    # Conflict detected: abort and instruct user to resolve
+                                    raise SystemExit(
+                                        f"Plugin conflict for action '{act_name}': provider '{provider}' wants to register but '{existing_provider}' is already providing it.\n"
+                                        "Resolve by removing one of the plugins or set 'preferred_plugins' in settings.json to choose a provider."
+                                    )
+                            else:
+                                handlers[act_name] = handler_fn
+                                provider_map[act_name] = provider
 
                     # Optional pre_send hooks: include only if provider matches settings (when provided)
                     if "pre_send" in regs and isinstance(regs["pre_send"], list):
