@@ -8,10 +8,39 @@ import aiohttp
 import inspect
 
 from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
+from llm_config import LLM_STREAM, PARTIAL_TTL, FINAL_TTL, PARTIAL_SAVE_THRESHOLD, LLM_TIMEOUT
 import actions
 from plugin_loader import load_plugins
 import memory_summarizer
 import web_sanitizer
+from kv_store import get_default_kv, messages_list_key, response_cache_key
+from llm_config import LLM_STREAM
+
+
+def _extract_texts(obj):
+    """Recursively collect string pieces from JSON objects.
+
+    This is permissive: it gathers any string leaf values so we can
+    handle different streaming JSON shapes produced by various LLM
+    servers (e.g., keys named `content`, `delta`, `text`, or nested
+    message structures).
+    """
+    out = []
+    if obj is None:
+        return out
+    if isinstance(obj, str):
+        out.append(obj)
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.extend(_extract_texts(v))
+        return out
+    if isinstance(obj, list):
+        for it in obj:
+            out.extend(_extract_texts(it))
+        return out
+    # other primitive (int/float/bool) -> ignore
+    return out
 
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
@@ -152,8 +181,158 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
             print("[debug] (could not serialize payload)")
         print("Please wait, thinking...")
 
-    # Increase total timeout to allow slower model responses
-    timeout = aiohttp.ClientTimeout(total=120)
+    # Try to read from response cache first
+    try:
+        kv = await get_default_kv()
+    except Exception:
+        kv = None
+
+    messages_json = None
+    cache_key = None
+    if kv is not None:
+        try:
+            messages_json = json.dumps(messages, sort_keys=True)
+            cache_key = response_cache_key(MODEL, LLM_OPTIONS, messages_json)
+            cached = await kv.get(cache_key)
+            if cached is not None:
+                if debug:
+                    print("[debug] cache hit for request")
+                return cached, prefetch_texts
+
+            # If a partial response exists, return it immediately and
+            # refresh the final value in background so future requests
+            # get the completed response.
+            partial_key = cache_key + ":partial"
+            partial = await kv.get(partial_key)
+            if partial is not None:
+                if debug:
+                    print("[debug] partial cache hit; returning partial and refreshing in background")
+
+                async def _background_refresh(p: dict, k: KVStore, ckey: str, payload_obj: dict):
+                    # Do a non-streaming request to get the final content and cache it.
+                    timeout = aiohttp.ClientTimeout(total=120)
+                    try:
+                        async with aiohttp.ClientSession(timeout=timeout) as session:
+                            async with session.post(OLLAMA_URL, json=payload_obj) as resp:
+                                if resp.status != 200:
+                                    return
+                                data = await resp.json()
+                                if "message" in data and "content" in data["message"]:
+                                    final_text = data["message"]["content"]
+                                    try:
+                                        await k.set(ckey, final_text, ex=FINAL_TTL)
+                                        await k.delete(ckey + ":partial")
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                # schedule background refresh
+                try:
+                    asyncio.create_task(_background_refresh({}, kv, cache_key, payload))
+                except Exception:
+                    pass
+
+                return partial, prefetch_texts
+        except Exception:
+            pass
+
+    # Determine whether to use streaming: env toggle or options flag
+    use_stream = LLM_STREAM or bool(LLM_OPTIONS.get("stream"))
+
+    if use_stream:
+        async def _stream_gen():
+            # Buffer-based SSE-style parser: accumulate bytes, split on
+            # double-newline between events, extract 'data:' lines that
+            # typically contain JSON, parse them and yield textual pieces.
+            timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    async with session.post(OLLAMA_URL, json=payload) as resp:
+                        if resp.status != 200:
+                            text = await resp.text()
+                            raise RuntimeError(f"LLM returned status {resp.status}: {text}")
+
+                        buf = ""
+                        assembled = []
+                        last_saved_len = 0
+                        partial_key = (cache_key + ":partial") if cache_key else None
+                        save_threshold = PARTIAL_SAVE_THRESHOLD  # characters between partial writes
+
+                        async for raw_chunk in resp.content.iter_chunked(1024):
+                            try:
+                                s = raw_chunk.decode()
+                            except Exception:
+                                s = raw_chunk.decode(errors="ignore")
+                            buf += s
+                            # Process complete SSE events separated by \n\n
+                            while "\n\n" in buf:
+                                event, buf = buf.split("\n\n", 1)
+                                # Collect `data:` lines
+                                data_lines = []
+                                for line in event.splitlines():
+                                    if line.startswith("data:"):
+                                        data_lines.append(line[5:].lstrip())
+                                if not data_lines:
+                                    # Not an SSE event we care about
+                                    continue
+                                data_str = "\n".join(data_lines)
+                                # Try to parse JSON payloads, otherwise yield raw data
+                                try:
+                                    obj = json.loads(data_str)
+                                except Exception:
+                                    # Not JSON: yield as-is
+                                    if data_str.strip():
+                                        assembled.append(data_str)
+                                        yield data_str
+                                    continue
+
+                                # Extract textual pieces from JSON delta
+                                pieces = _extract_texts(obj)
+                                if pieces:
+                                    for piece in pieces:
+                                        if piece:
+                                            assembled.append(piece)
+                                            yield piece
+
+                            # Periodically persist partial assembled content
+                            if partial_key and assembled and len("".join(assembled)) - last_saved_len >= save_threshold:
+                                try:
+                                    await kv.set(partial_key, "".join(assembled), ex=PARTIAL_TTL)
+                                    last_saved_len = len("".join(assembled))
+                                except Exception:
+                                    pass
+
+                        # Flush any remaining buffered text when stream ends
+                        if buf.strip():
+                            try:
+                                obj = json.loads(buf)
+                                pieces = _extract_texts(obj)
+                                for piece in pieces:
+                                    if piece:
+                                        assembled.append(piece)
+                                        yield piece
+                            except Exception:
+                                assembled.append(buf)
+                                yield buf
+
+                        # Finalize: cache final assembled response and remove partial
+                        final_text = "".join(assembled)
+                        if kv is not None and cache_key:
+                            try:
+                                await kv.set(cache_key, final_text, ex=FINAL_TTL)
+                                if partial_key:
+                                    await kv.delete(partial_key)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    import traceback
+                    raise RuntimeError(f"LLM streaming request failed: {e!r}\n{traceback.format_exc()}")
+
+        return _stream_gen(), prefetch_texts
+
+    # Non-streaming (legacy) path: request full JSON and cache result
+    timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -168,7 +347,14 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
     if "message" not in data or "content" not in data["message"]:
         raise RuntimeError(f"Unexpected LLM response shape: {data}")
 
-    return data["message"]["content"], prefetch_texts
+    final = data["message"]["content"]
+    if kv is not None and cache_key:
+        try:
+            await kv.set(cache_key, final, ex=60)
+        except Exception:
+            pass
+
+    return final, prefetch_texts
 
 
 async def check_model_endpoint(debug: bool = False):
@@ -194,7 +380,7 @@ async def check_model_endpoint(debug: bool = False):
         print("Please wait, thinking...")
 
     # Health check may take longer depending on model load; allow more time
-    timeout = aiohttp.ClientTimeout(total=120)
+    timeout = aiohttp.ClientTimeout(total=LLM_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(OLLAMA_URL, json=payload) as resp:
@@ -236,11 +422,64 @@ async def main_async():
     parser.add_argument("--debug", action="store_true", help="Enable debug output for LLM requests")
     parser.add_argument("--rolling-window", type=int, default=ROLLING_WINDOW, help="Number of recent exchanges to include in context (user+assistant pairs)")
     parser.add_argument("--summarize-memory", action="store_true", help="Enable memory summarization of recent exchanges before sending to the LLM")
+    parser.add_argument("--show-settings", action="store_true", help="Print effective LLM and cache settings and exit")
     args = parser.parse_args()
+
+    async def _print_settings_and_exit():
+        # Load KV to report backend status
+        try:
+            kv = await get_default_kv()
+            backend = "redis" if getattr(kv, "_use_redis", False) else "in-memory"
+        except Exception:
+            backend = "unavailable"
+
+        # Basic validation
+        warnings = []
+        if PARTIAL_TTL <= 0:
+            warnings.append("PARTIAL_TTL should be > 0")
+        if FINAL_TTL <= 0:
+            warnings.append("FINAL_TTL should be > 0")
+        if PARTIAL_SAVE_THRESHOLD <= 0:
+            warnings.append("PARTIAL_SAVE_THRESHOLD should be > 0")
+
+        print("Effective settings:")
+        print(f"- model: {MODEL}")
+        print(f"- ollama_url: {OLLAMA_URL}")
+        print(f"- llm_options: {json.dumps(LLM_OPTIONS)}")
+        print(f"- streaming enabled (env/settings): {LLM_STREAM}")
+        print(f"- partial_ttl: {PARTIAL_TTL}s")
+        print(f"- final_ttl: {FINAL_TTL}s")
+        print(f"- partial_save_threshold: {PARTIAL_SAVE_THRESHOLD} chars")
+        print(f"- kv backend: {backend}")
+        if warnings:
+            print("Warnings:")
+            for w in warnings:
+                print(f"- {w}")
+        return
+
+    if args.show_settings:
+        await _print_settings_and_exit()
+        return
 
     history: List[dict] = []
     actions_list = actions.load_actions()
     handlers, pre_send_hooks = load_plugins()
+
+    # Connect to KV and load recent history (if any). Uses a simple default
+    # session id; this can be extended later to support per-user sessions.
+    session_id = "default"
+    kv = await get_default_kv()
+    try:
+        raw = await kv.lrange(messages_list_key(session_id), 0, -1)
+        if raw:
+            for item in raw:
+                try:
+                    history.append(json.loads(item))
+                except Exception:
+                    history.append({"role": "assistant", "content": item})
+    except Exception:
+        # If KV is unavailable, continue with in-memory history only
+        pass
 
     # Print available actions and plugins for visibility/debugging
     actions_desc = actions.actions_description(actions_list)
@@ -278,6 +517,13 @@ async def main_async():
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye")
             break
+        # Persist the user's message immediately (write-through) so it becomes
+        # part of memory for subsequent requests and for crash recovery.
+        history.append({"role": "user", "content": user_input})
+        try:
+            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "user", "content": user_input}))
+        except Exception:
+            pass
 
         try:
             llm_output, prefetch_texts = await call_llm(
@@ -289,6 +535,32 @@ async def main_async():
                 summarize_memory=args.summarize_memory,
                 pre_send_hooks=pre_send_hooks,
             )
+            # If a streaming generator was returned, consume it and assemble final text
+            if hasattr(llm_output, "__aiter__"):
+                chunks = []
+                print("Assistant:", end=" ", flush=True)
+                try:
+                    async for part in llm_output:
+                        print(part, end="", flush=True)
+                        chunks.append(part)
+                except Exception as e:
+                    print("\n[streaming error]:", e)
+                print()
+                final_content = "".join(chunks)
+                # Cache the final streaming response when possible
+                try:
+                    sys_prompt = load_system_prompt()
+                    msgs_for_cache = build_messages(sys_prompt, actions_desc, history, user_input, args.rolling_window, args.summarize_memory, prefetch_texts=prefetch_texts)
+                    messages_json = json.dumps(msgs_for_cache, sort_keys=True)
+                    cache_key = response_cache_key(MODEL, LLM_OPTIONS, messages_json)
+                    if kv is not None and cache_key:
+                        try:
+                            await kv.set(cache_key, final_content, ex=60)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                llm_output = final_content
         except Exception as e:
             print("Assistant (error):", e)
             continue
@@ -337,15 +609,21 @@ async def main_async():
                     print(f"No plugin registered for action '{parsed.tool}'")
 
             # Save the user message then assistant reply in chronological order
-            history.append({"role": "user", "content": user_input})
             history.append({"role": "assistant", "content": parsed_json})
+            try:
+                await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": parsed_json}))
+            except Exception:
+                pass
             continue
 
         # Not a tool call: normal assistant reply
         print("Assistant:", llm_output)
         # Save the user message then assistant reply in chronological order
-        history.append({"role": "user", "content": user_input})
         history.append({"role": "assistant", "content": llm_output})
+        try:
+            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": llm_output}))
+        except Exception:
+            pass
 
 
 def main():
