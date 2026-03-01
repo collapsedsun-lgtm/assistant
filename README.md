@@ -51,6 +51,19 @@ Notes
 - The agent uses a rolling context window (last few exchanges) to provide short-term memory.
 - The agent will never execute actions itself; it prints validated action JSON. Build a separate runner to consume and safely execute those actions.
 
+Recent changes (2026-03-01)
+- **Improve latency by using KV store**: a new `kv_store.py` and related changes reduce repeated computation and speed up repeated queries.
+- **Session / bootstrap behavior**: the assistant now attempts a one-time bootstrap with the model when the backend supports server-side sessions; note that `/api/chat` endpoints do not provide persistent session semantics, so session-mode is disabled for that endpoint and the assistant falls back to the per-request prompt flow.
+- **Keep-alive and health-checks**: requests include a `keep_alive` option (configurable via `settings.json`) to reduce cold-starts; health checks were changed to connectivity-only checks to avoid contaminating session state.
+- **Streaming parsing fix**: streaming output parsing was tightened to avoid model metadata leaking into assistant text (you should see cleaner streaming outputs now).
+- **Files changed**: `assistant.py`, `kv_store.py`, `llm_config.py`, `plugin_loader.py`, plugins under `plugins/`, `system_prompt.txt`, and `settings.json` were touched in the recent PR.
+
+Where to look next
+- `assistant.py`: main changes to session handling, bootstrap ordering, and streaming parsing.
+- `settings.json`: new/updated keys control `ollama_use_session` and `ollama_keep_alive`.
+- `kv_store.py`: caching/kv logic used to improve latency on repeated operations.
+
+
 CLI Flags
 - `--mock`: Run with a simple local mock LLM (useful for testing without a model endpoint).
 - `--run-plugins`: Allow executing discovered plugins for validated actions (optional; disabled by default).
