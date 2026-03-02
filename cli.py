@@ -192,6 +192,7 @@ async def main_async():
                 cumulative = ""
                 mode = None  # 'maybe_json' or 'text'
                 detected_action = False
+                stream_printed_progressively = False
                 try:
                     async for part in llm_output:
                         # Determine mode from first non-whitespace char of first part
@@ -205,13 +206,13 @@ async def main_async():
                                 mode = "maybe_json"
                             else:
                                 mode = "text"
+                                stream_printed_progressively = True
                                 print("Assistant:", end=" ", flush=True)
 
                         cumulative += part
 
                         if mode == "text":
-                            # print progressively for text responses
-                            print(part, end="", flush=True)
+                            # Buffer text parts instead of printing progressively
                             chunks.append(part)
                         else:
                             # buffer JSON-like responses and attempt to parse as a tool call
@@ -236,12 +237,9 @@ async def main_async():
                 # If we didn't detect an action and were in JSON-mode, treat cumulative as text
                 if not detected_action:
                     if mode == "maybe_json":
-                        # print the buffered content as it wasn't a tool-call
-                        print("Assistant:", end=" ", flush=True)
-                        print(cumulative, end="\n", flush=True)
+                        # treat the buffered content as text
                         final_content = cumulative
                     else:
-                        print()  # newline after progressive text
                         final_content = "".join(chunks)
 
                 # Cache the final streaming response when possible
