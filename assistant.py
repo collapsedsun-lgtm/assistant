@@ -14,7 +14,8 @@ import actions
 from plugin_loader import load_plugins
 import memory_summarizer
 import web_sanitizer
-from kv_store import get_default_kv, messages_list_key, response_cache_key
+from kv_store import get_default_kv, response_cache_key
+import session as session_module
 from llm_config import LLM_STREAM
 
 # Session mode flag: when True we send a short hint per request and rely on
@@ -653,18 +654,7 @@ async def main_async():
     # Connect to KV and load recent history (if any). Uses a simple default
     # session id; this can be extended later to support per-user sessions.
     session_id = "default"
-    kv = await get_default_kv()
-    try:
-        raw = await kv.lrange(messages_list_key(session_id), 0, -1)
-        if raw:
-            for item in raw:
-                try:
-                    history.append(json.loads(item))
-                except Exception:
-                    history.append({"role": "assistant", "content": item})
-    except Exception:
-        # If KV is unavailable, continue with in-memory history only
-        pass
+    kv, history = await session_module.load_history(session_id)
     if handlers:
         print("\nDiscovered plugin handlers (action -> handler):")
         for name in sorted(handlers.keys()):
@@ -747,7 +737,7 @@ async def main_async():
         # current `user_input` as the final message, and appending it to
         # `history` causes duplication in the request payload.
         try:
-            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "user", "content": user_input}))
+            await session_module.persist_message(session_id, kv, "user", user_input)
         except Exception:
             pass
 
@@ -922,7 +912,7 @@ async def main_async():
                             print("Assistant:", cleaned_formatted)
                             history.append({"role": "assistant", "content": cleaned_formatted})
                             try:
-                                await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": cleaned_formatted}))
+                                await session_module.persist_message(session_id, kv, "assistant", cleaned_formatted)
                             except Exception:
                                 pass
                         except Exception as e:
@@ -936,7 +926,7 @@ async def main_async():
             # Save the user message then assistant reply in chronological order
             history.append({"role": "assistant", "content": parsed_json})
             try:
-                await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": parsed_json}))
+                await session_module.persist_message(session_id, kv, "assistant", parsed_json)
             except Exception:
                 pass
             continue
@@ -947,7 +937,7 @@ async def main_async():
         # Save the user message then assistant reply in chronological order
         history.append({"role": "assistant", "content": cleaned})
         try:
-            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": cleaned}))
+            await session_module.persist_message(session_id, kv, "assistant", cleaned)
         except Exception:
             pass
 
