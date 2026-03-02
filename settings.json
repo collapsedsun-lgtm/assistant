@@ -27,4 +27,14 @@
     "turn_on_light": "automation_plugin",
     "turn_off_light": "automation_plugin"
   }
+  ,
+  "tts": {
+    "enabled": false,
+    "provider": "piper",
+    "mode": "http",
+    "server_url": "http://localhost:5002/synthesize",
+    "binary_cmd": null,
+    "headers": {},
+    "output_dir": "/tmp"
+  }
 }

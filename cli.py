@@ -16,6 +16,12 @@ from llm_client import call_llm, check_model_endpoint
 from utils import load_system_prompt, load_settings, _sanitize_assistant_output
 from assistant_core import build_messages, try_parse_tool_call
 from assistant import ROLLING_WINDOW
+from tts_piper import PiperTTS
+import tempfile
+import time
+import os
+import shutil
+import subprocess
 
 
 async def ainput(prompt: str = "") -> str:
@@ -82,6 +88,77 @@ async def main_async():
     actions_list = actions.load_actions()
     settings = load_settings()
     handlers, pre_send_hooks = load_plugins(settings)
+
+    # Initialize TTS (Piper) if configured
+    tts_settings = settings.get("tts", {}) if isinstance(settings, dict) else {}
+    _tts_enabled = bool(tts_settings.get("enabled", False))
+    _tts_provider = tts_settings.get("provider", "piper")
+    piper_tts = None
+    if _tts_enabled and _tts_provider == "piper":
+        try:
+            piper_mode = tts_settings.get("mode", "http")
+            piper_server = tts_settings.get("server_url")
+            piper_bin = tts_settings.get("binary_cmd")
+            piper_headers = tts_settings.get("headers", {})
+            piper_tts = PiperTTS(mode=piper_mode, server_url=piper_server, binary_cmd=piper_bin, headers=piper_headers)
+            print("TTS enabled: Piper configured")
+        except Exception as e:
+            print("Failed to initialize Piper TTS:", e)
+
+    async def _maybe_speak(text: str):
+        if not piper_tts:
+            return
+        out_dir = tts_settings.get("output_dir", "/tmp")
+        try:
+            fn = os.path.join(out_dir, f"assistant_tts_{int(time.time()*1000)}.wav")
+            loop = asyncio.get_running_loop()
+
+            # For HTTP-mode Piper we can avoid disk I/O and stream-play raw WAV bytes
+            if getattr(piper_tts, "mode", None) == "http":
+                try:
+                    audio_bytes = await loop.run_in_executor(None, piper_tts.synthesize, text, None)
+                    # Try to play bytes with available player
+                    played = False
+                    # Prefer aplay (reads WAV from stdin with -t wav -)
+                    if shutil.which("aplay"):
+                        p = subprocess.Popen(["aplay", "-t", "wav", "-"], stdin=subprocess.PIPE)
+                        p.stdin.write(audio_bytes)
+                        p.stdin.close()
+                        played = True
+                    elif shutil.which("ffplay"):
+                        # ffplay can read from stdin; suppress console output
+                        p = subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"], stdin=subprocess.PIPE)
+                        p.stdin.write(audio_bytes)
+                        p.stdin.close()
+                        played = True
+
+                    if played:
+                        print("[TTS played (stream)]")
+                        return
+                    # fallback: write to file and play via xdg-open
+                    with open(fn, "wb") as fh:
+                        fh.write(audio_bytes)
+                    print(f"[TTS saved to {fn}]")
+                    # attempt to launch a player in background
+                    if shutil.which("xdg-open"):
+                        subprocess.Popen(["xdg-open", fn])
+                    return
+                except Exception:
+                    # proceed to file-based fallback
+                    pass
+
+            # Default: write to file (binary-mode or fallback)
+            await loop.run_in_executor(None, piper_tts.synthesize, text, fn)
+            print(f"[TTS saved to {fn}]")
+            # attempt to play file asynchronously with a low-latency player
+            if shutil.which("aplay"):
+                subprocess.Popen(["aplay", fn])
+            elif shutil.which("ffplay"):
+                subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", fn])
+            elif shutil.which("xdg-open"):
+                subprocess.Popen(["xdg-open", fn])
+        except Exception as e:
+            print("[TTS error]:", e)
 
     # Connect to KV and load recent history (if any). Uses a simple default
     # session id; this can be extended later to support per-user sessions.
@@ -348,6 +425,10 @@ async def main_async():
                                 await session_module.persist_message(session_id, kv, "assistant", cleaned_formatted)
                             except Exception:
                                 pass
+                            try:
+                                await _maybe_speak(cleaned_formatted)
+                            except Exception:
+                                pass
                         except Exception as e:
                             # Fall back to printing raw plugin result
                             print("Plugin formatting error:", e)
@@ -371,5 +452,9 @@ async def main_async():
         history.append({"role": "assistant", "content": cleaned})
         try:
             await session_module.persist_message(session_id, kv, "assistant", cleaned)
+        except Exception:
+            pass
+        try:
+            await _maybe_speak(cleaned)
         except Exception:
             pass
