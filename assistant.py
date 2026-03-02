@@ -7,6 +7,7 @@ from typing import List
 import aiohttp
 import inspect
 import time
+from assistant_core import build_messages, try_parse_tool_call
 
 from llm_config import MODEL, OLLAMA_URL, LLM_OPTIONS
 from llm_config import LLM_STREAM, PARTIAL_TTL, FINAL_TTL, PARTIAL_SAVE_THRESHOLD, LLM_TIMEOUT
@@ -118,52 +119,7 @@ def load_settings() -> dict:
         return {}
 
 
-def build_messages(
-    system_prompt: str,
-    actions_desc: str,
-    history: List[dict],
-    user_input: str,
-    rolling_window: int,
-    summarize_memory: bool = False,
-    prefetch_texts: List[str] | None = None,
-) -> List[dict]:
-    # Compose system prompt. Avoid duplicating action instructions when the
-    # base prompt already includes an "Available actions" section.
-    if actions_desc and "available actions" not in system_prompt.lower():
-        system_content = system_prompt + "\n\nAvailable actions:\n" + actions_desc
-    else:
-        system_content = system_prompt
-
-
-    msgs = [{"role": "system", "content": system_content}]
-    # Optionally include a memory summary as a system-level note
-    if summarize_memory and history:
-        summary = memory_summarizer.summarize(history, rolling_window)
-        msgs.append({"role": "system", "content": "Memory summary: " + summary})
-
-    # Optionally include sanitized pre-fetched facts (from pre_send hooks)
-    if prefetch_texts:
-        combined = "\n\n".join(t for t in prefetch_texts if t)
-        if combined:
-            msgs.append({"role": "system", "content": "Pre-fetched facts (sanitized):\n" + combined})
-
-    # Include rolling history (already formatted as role/content dicts)
-    start = max(0, len(history) - (rolling_window * 2))
-    # Ensure message contents are strings when sent to the LLM
-    for m in history[start:]:
-        content = m.get("content")
-        if isinstance(content, dict):
-            try:
-                content_str = json.dumps(content)
-            except Exception:
-                content_str = str(content)
-        else:
-            content_str = str(content)
-        msgs.append({"role": m.get("role", "user"), "content": content_str})
-
-    # Add current user input
-    msgs.append({"role": "user", "content": user_input})
-    return msgs
+from assistant_core import build_messages, try_parse_tool_call
 
 
 

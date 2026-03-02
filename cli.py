@@ -13,7 +13,8 @@ import web_sanitizer
 from kv_store import get_default_kv, response_cache_key
 import session as session_module
 from llm_client import call_llm, check_model_endpoint
-from assistant import build_messages, load_system_prompt, load_settings, _sanitize_assistant_output, try_parse_tool_call, ROLLING_WINDOW
+from assistant import load_system_prompt, load_settings, _sanitize_assistant_output, ROLLING_WINDOW
+from assistant_core import build_messages, try_parse_tool_call
 
 
 async def ainput(prompt: str = "") -> str:

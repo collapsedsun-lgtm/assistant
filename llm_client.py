@@ -161,7 +161,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
         messages.append({"role": "user", "content": user_input})
     else:
         # Build messages locally to avoid importing assistant module
-        from assistant import build_messages
+        from assistant_core import build_messages
 
         messages = build_messages(
             system_prompt_to_send,
