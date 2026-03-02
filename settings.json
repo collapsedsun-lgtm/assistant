@@ -35,6 +35,12 @@
     "server_url": "http://localhost:5002/synthesize",
     "binary_cmd": null,
     "headers": {},
-    "output_dir": "/tmp"
+    "output_dir": "/tmp",
+    "playback": {
+      "enabled": true,
+      "preferred_player": null,
+      "volume": 1.0,
+      "queue": true
+    }
   }
 }

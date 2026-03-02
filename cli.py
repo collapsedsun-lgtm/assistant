@@ -17,6 +17,7 @@ from utils import load_system_prompt, load_settings, _sanitize_assistant_output
 from assistant_core import build_messages, try_parse_tool_call
 from assistant import ROLLING_WINDOW
 from tts_piper import PiperTTS
+from tts_playback import PlaybackManager
 import tempfile
 import time
 import os
@@ -89,11 +90,12 @@ async def main_async():
     settings = load_settings()
     handlers, pre_send_hooks = load_plugins(settings)
 
-    # Initialize TTS (Piper) if configured
+    # Initialize TTS (Piper) and optional playback manager if configured
     tts_settings = settings.get("tts", {}) if isinstance(settings, dict) else {}
     _tts_enabled = bool(tts_settings.get("enabled", False))
     _tts_provider = tts_settings.get("provider", "piper")
     piper_tts = None
+    playback_manager = None
     if _tts_enabled and _tts_provider == "piper":
         try:
             piper_mode = tts_settings.get("mode", "http")
@@ -104,6 +106,17 @@ async def main_async():
             print("TTS enabled: Piper configured")
         except Exception as e:
             print("Failed to initialize Piper TTS:", e)
+
+        # Playback manager initialization
+        try:
+            pb = tts_settings.get("playback", {})
+            if pb.get("enabled", True):
+                preferred = pb.get("preferred_player")
+                volume = pb.get("volume", 1.0)
+                playback_manager = PlaybackManager(preferred_player=preferred, default_volume=volume, queue_enabled=pb.get("queue", True))
+                print("TTS playback enabled")
+        except Exception as e:
+            print("Failed to initialize playback manager:", e)
 
     async def _maybe_speak(text: str):
         if not piper_tts:
@@ -117,16 +130,20 @@ async def main_async():
             if getattr(piper_tts, "mode", None) == "http":
                 try:
                     audio_bytes = await loop.run_in_executor(None, piper_tts.synthesize, text, None)
-                    # Try to play bytes with available player
+                    # If a playback manager is configured, enqueue bytes (non-blocking)
+                    if playback_manager:
+                        playback_manager.enqueue_bytes(audio_bytes)
+                        print("[TTS enqueued for playback]")
+                        return
+
+                    # No manager: try direct player piping (best-effort)
                     played = False
-                    # Prefer aplay (reads WAV from stdin with -t wav -)
                     if shutil.which("aplay"):
                         p = subprocess.Popen(["aplay", "-t", "wav", "-"], stdin=subprocess.PIPE)
                         p.stdin.write(audio_bytes)
                         p.stdin.close()
                         played = True
                     elif shutil.which("ffplay"):
-                        # ffplay can read from stdin; suppress console output
                         p = subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"], stdin=subprocess.PIPE)
                         p.stdin.write(audio_bytes)
                         p.stdin.close()
@@ -135,11 +152,11 @@ async def main_async():
                     if played:
                         print("[TTS played (stream)]")
                         return
+
                     # fallback: write to file and play via xdg-open
                     with open(fn, "wb") as fh:
                         fh.write(audio_bytes)
                     print(f"[TTS saved to {fn}]")
-                    # attempt to launch a player in background
                     if shutil.which("xdg-open"):
                         subprocess.Popen(["xdg-open", fn])
                     return
@@ -147,16 +164,18 @@ async def main_async():
                     # proceed to file-based fallback
                     pass
 
-            # Default: write to file (binary-mode or fallback)
+            # Default: write to file (binary-mode or fallback) and use playback manager if available
             await loop.run_in_executor(None, piper_tts.synthesize, text, fn)
             print(f"[TTS saved to {fn}]")
-            # attempt to play file asynchronously with a low-latency player
-            if shutil.which("aplay"):
-                subprocess.Popen(["aplay", fn])
-            elif shutil.which("ffplay"):
-                subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", fn])
-            elif shutil.which("xdg-open"):
-                subprocess.Popen(["xdg-open", fn])
+            if playback_manager:
+                playback_manager.enqueue_file(fn)
+            else:
+                if shutil.which("aplay"):
+                    subprocess.Popen(["aplay", fn])
+                elif shutil.which("ffplay"):
+                    subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", fn])
+                elif shutil.which("xdg-open"):
+                    subprocess.Popen(["xdg-open", fn])
         except Exception as e:
             print("[TTS error]:", e)
 
