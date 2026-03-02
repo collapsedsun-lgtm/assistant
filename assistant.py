@@ -74,6 +74,26 @@ def _extract_texts(obj):
     # other primitive (int/float/bool) -> ignore
     return out
 
+
+def _sanitize_assistant_output(text: str) -> str:
+    """Remove leading speaker labels that models sometimes emit (e.g. "Assistant:").
+
+    This prevents duplicate printed labels like "Assistant: Assistant: ...".
+    """
+    if not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return ""
+    import re
+
+    # Remove common leading speaker prefixes (case-insensitive), e.g.
+    # "Assistant: ", "assistant -", "Assistant —".
+    cleaned = re.sub(r"^\s*(assistant)\s*[:\-–—]\s*", "", text, flags=re.I)
+    # Also remove a bare leading 'assistant' followed by whitespace/newline
+    cleaned = re.sub(r"^\s*(assistant)\s+", "", cleaned, flags=re.I)
+    return cleaned
+
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
 ROLLING_WINDOW = 5
@@ -897,11 +917,12 @@ async def main_async():
                             else:
                                 formatted_text = formatted
 
-                            # Print and persist the formatted assistant reply
-                            print("Assistant:", formatted_text)
-                            history.append({"role": "assistant", "content": formatted_text})
+                            # Sanitize, print and persist the formatted assistant reply
+                            cleaned_formatted = _sanitize_assistant_output(formatted_text)
+                            print("Assistant:", cleaned_formatted)
+                            history.append({"role": "assistant", "content": cleaned_formatted})
                             try:
-                                await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": formatted_text}))
+                                await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": cleaned_formatted}))
                             except Exception:
                                 pass
                         except Exception as e:
@@ -921,11 +942,12 @@ async def main_async():
             continue
 
         # Not a tool call: normal assistant reply
-        print("Assistant:", llm_output)
+        cleaned = _sanitize_assistant_output(llm_output)
+        print("Assistant:", cleaned)
         # Save the user message then assistant reply in chronological order
-        history.append({"role": "assistant", "content": llm_output})
+        history.append({"role": "assistant", "content": cleaned})
         try:
-            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": llm_output}))
+            await kv.rpush(messages_list_key(session_id), json.dumps({"role": "assistant", "content": cleaned}))
         except Exception:
             pass
 
