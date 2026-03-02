@@ -31,14 +31,14 @@
   "tts": {
     "enabled": false,
     "provider": "piper",
-    "mode": "http",
+    "mode": "binary",
     "server_url": "http://localhost:5002/synthesize",
-    "binary_cmd": null,
+    "binary_cmd": ["piper", "--model", "myvoice", "--text", "{text}", "-o", "{out}"],
     "headers": {},
     "output_dir": "/tmp",
     "playback": {
       "enabled": true,
-      "preferred_player": null,
+      "preferred_player": "/usr/bin/aplay",
       "volume": 1.0,
       "queue": true
     }

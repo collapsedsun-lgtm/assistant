@@ -164,7 +164,44 @@ async def main_async():
                     # proceed to file-based fallback
                     pass
 
-            # Default: write to file (binary-mode or fallback) and use playback manager if available
+            # Binary-mode: attempt to capture stdout bytes from the CLI binary
+            if getattr(piper_tts, "mode", None) == "binary":
+                try:
+                    audio_bytes = await loop.run_in_executor(None, piper_tts.synthesize, text, None)
+                    if isinstance(audio_bytes, (bytes, bytearray)):
+                        if playback_manager:
+                            playback_manager.enqueue_bytes(bytes(audio_bytes))
+                            print("[TTS enqueued for playback]")
+                            return
+                        # No manager: attempt direct piping
+                        played = False
+                        if shutil.which("aplay"):
+                            p = subprocess.Popen(["aplay", "-t", "wav", "-"], stdin=subprocess.PIPE)
+                            p.stdin.write(audio_bytes)
+                            p.stdin.close()
+                            played = True
+                        elif shutil.which("ffplay"):
+                            p = subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"], stdin=subprocess.PIPE)
+                            p.stdin.write(audio_bytes)
+                            p.stdin.close()
+                            played = True
+
+                        if played:
+                            print("[TTS played (stream)]")
+                            return
+
+                        # fallback to file
+                        with open(fn, "wb") as fh:
+                            fh.write(audio_bytes)
+                        print(f"[TTS saved to {fn}]")
+                        if shutil.which("xdg-open"):
+                            subprocess.Popen(["xdg-open", fn])
+                        return
+                except Exception:
+                    # fall back to file-based invocation
+                    pass
+
+            # Default: write to file (fallback) and use playback manager if available
             await loop.run_in_executor(None, piper_tts.synthesize, text, fn)
             print(f"[TTS saved to {fn}]")
             if playback_manager:
@@ -302,8 +339,10 @@ async def main_async():
                                 mode = "maybe_json"
                             else:
                                 mode = "text"
+                                # Do not print the assistant label here; we'll print
+                                # the sanitized final reply below to avoid duplicate
+                                # leading labels when the model emits 'Assistant: ...'.
                                 stream_printed_progressively = True
-                                print("Assistant:", end=" ", flush=True)
 
                         cumulative += part
 

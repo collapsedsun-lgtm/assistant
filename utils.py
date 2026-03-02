@@ -56,9 +56,19 @@ def _sanitize_assistant_output(text: str) -> str:
             return ""
     import re
 
-    cleaned = re.sub(r"^\s*(assistant)\s*[:\-–—]\s*", "", text, flags=re.I)
-    cleaned = re.sub(r"^\s*(assistant)\s+", "", cleaned, flags=re.I)
-    return cleaned
+    # Remove any number of repeated leading speaker labels like
+    # "Assistant:", "assistant -", "Assistant —" (case-insensitive).
+    # Repeat removal to handle outputs like "Assistant: Assistant: ...".
+    cleaned = text
+    pattern = re.compile(r"^\s*(assistant)\s*(?:[:\-–—])?\s*", flags=re.I)
+    prev = None
+    # Loop until no more leading 'assistant' labels
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = pattern.sub("", cleaned)
+
+    # Final trim of whitespace/newlines
+    return cleaned.strip()
 
 
 def load_system_prompt() -> str:
