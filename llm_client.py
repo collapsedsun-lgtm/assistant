@@ -13,49 +13,7 @@ import memory_summarizer
 from kv_store import get_default_kv, response_cache_key
 
 
-def _extract_texts(obj):
-    out = []
-    if obj is None:
-        return out
-    if isinstance(obj, str):
-        out.append(obj)
-        return out
-    if isinstance(obj, dict):
-        message = obj.get("message")
-        if isinstance(message, dict):
-            content = message.get("content")
-            if isinstance(content, str) and content:
-                out.append(content)
-
-        response = obj.get("response")
-        if isinstance(response, str) and response:
-            out.append(response)
-
-        delta = obj.get("delta")
-        if isinstance(delta, dict):
-            dcontent = delta.get("content")
-            if isinstance(dcontent, str) and dcontent:
-                out.append(dcontent)
-
-        text = obj.get("text")
-        if isinstance(text, str) and text:
-            out.append(text)
-
-        content = obj.get("content")
-        if isinstance(content, str) and content:
-            out.append(content)
-
-        if out:
-            return out
-
-        for v in obj.values():
-            out.extend(_extract_texts(v))
-        return out
-    if isinstance(obj, list):
-        for it in obj:
-            out.extend(_extract_texts(it))
-        return out
-    return out
+from utils import _extract_texts, load_system_prompt, load_settings
 
 
 def load_system_prompt() -> str:
