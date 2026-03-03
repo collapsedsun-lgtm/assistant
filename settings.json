@@ -1,9 +1,9 @@
 {
-  "default_location": "Bristol, UK",
+  "default_location": "Bristol",
   "local_timezone": "Europe/London",
   "default_temperature_unit": "Celsius",
   "ollama_use_session": true,
-  "weather_provider": "wttr",
+  "weather_provider": "open_meteo",
   "llm_stream": true,
 
   "model": "gemma:2b-instruct",
