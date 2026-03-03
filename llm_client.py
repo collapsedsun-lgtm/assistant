@@ -36,7 +36,7 @@ def load_settings() -> dict:
 async def call_llm(user_input: str, history: List[dict], mock: bool = False, debug: bool = False, rolling_window: int = 5, summarize_memory: bool = False, pre_send_hooks: List[callable] | None = None) -> tuple:
     if mock:
         if "time" in user_input.lower():
-            return json.dumps({"tool": "get_time", "args": {}}), []
+            return "The current time is available in the pre-fetched time context.", []
         return "I would do that if I could.", []
 
     system_prompt = load_system_prompt()
@@ -56,7 +56,7 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
 
     prefetch_texts: List[str] = []
     if pre_send_hooks:
-        for hook in pre_send_hooks:
+        async def _run_hook(hook):
             try:
                 maybe = None
                 try:
@@ -76,21 +76,27 @@ async def call_llm(user_input: str, history: List[dict], mock: bool = False, deb
                             maybe = await hook(user_input)
                         except TypeError:
                             maybe = None
+                return hook, maybe, None
+            except Exception as exc:
+                return hook, None, exc
 
-                if maybe:
-                    if isinstance(maybe, str):
-                        prefetch_texts.append(maybe)
-                    else:
-                        try:
-                            prefetch_texts.append(json.dumps(maybe))
-                        except Exception:
-                            prefetch_texts.append(str(maybe))
+        results = await asyncio.gather(*[_run_hook(h) for h in pre_send_hooks], return_exceptions=False)
+        for hook, maybe, err in results:
+            if err is not None:
                 if debug:
-                    print(f"[debug] pre_send hook {getattr(hook, '__name__', repr(hook))} returned: {repr(maybe)[:400]}")
-            except Exception:
-                if debug:
-                    import traceback
-                    print("[debug] pre_send hook failed:\n", traceback.format_exc())
+                    print(f"[debug] pre_send hook {getattr(hook, '__name__', repr(hook))} failed:")
+                    print(repr(err))
+                continue
+            if maybe:
+                if isinstance(maybe, str):
+                    prefetch_texts.append(maybe)
+                else:
+                    try:
+                        prefetch_texts.append(json.dumps(maybe))
+                    except Exception:
+                        prefetch_texts.append(str(maybe))
+            if debug:
+                print(f"[debug] pre_send hook {getattr(hook, '__name__', repr(hook))} returned: {repr(maybe)[:400]}")
 
     if use_session:
         messages: List[dict] = []

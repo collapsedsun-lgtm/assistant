@@ -24,4 +24,4 @@ if [ -f "$REQ_FILE" ]; then
 fi
 
 echo "Starting assistant..."
-exec python "$PWD/assistant.py" "$@"
+exec python "$PWD/main.py" "$@"

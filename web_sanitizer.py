@@ -210,3 +210,95 @@ def humanize_weather(snippet: str) -> str:
         sentence = sentence + "."
 
     return sentence
+
+
+def summarize_time_context(snippet: str) -> str:
+    """Convert `Time (sanitized): ...` context into a short spoken sentence."""
+    if not snippet:
+        return "I do not have time information right now."
+
+    s = snippet.strip()
+    if s.lower().startswith("time (sanitized):"):
+        s = s[len("time (sanitized):") :].strip()
+
+    import re
+
+    time_match = re.search(r"local_time\s*=\s*([^,]+)", s, re.I)
+    date_match = re.search(r"date\s*=\s*([^,]+)", s, re.I)
+    tz_match = re.search(r"timezone\s*=\s*([^,]+)", s, re.I)
+
+    local_time = time_match.group(1).strip() if time_match else None
+    date_str = date_match.group(1).strip() if date_match else None
+    timezone = tz_match.group(1).strip() if tz_match else None
+
+    parts = []
+    if local_time:
+        parts.append(f"The local time is {local_time}")
+    if date_str:
+        parts.append(f"on {date_str}")
+    if timezone:
+        parts.append(f"in {timezone}")
+
+    if not parts:
+        return "I do not have time information right now."
+
+    out = " ".join(parts)
+    if not out.endswith("."):
+        out += "."
+    return out
+
+
+def summarize_open_meteo_weather(snippet: str, user_query: str = "") -> str:
+    """Return a short weather reply from Open-Meteo pre-fetched block.
+
+    - Default: short current/day summary
+    - If query mentions tomorrow: prefer tomorrow line
+    - If query mentions week: return short 7-day outlook headline
+    """
+    if not snippet:
+        return "I do not have weather information right now."
+
+    lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
+    if not lines:
+        return "I do not have weather information right now."
+
+    summary_line = None
+    tomorrow_line = None
+    week_lines = []
+    in_week = False
+    for ln in lines:
+        low = ln.lower()
+        if low.startswith("weather (sanitized):"):
+            summary_line = ln.split(":", 1)[1].strip() if ":" in ln else ln
+        elif low.startswith("tomorrow"):
+            tomorrow_line = ln
+        elif low.startswith("7-day outlook"):
+            in_week = True
+        elif in_week and re.match(r"^\d{4}-\d{2}-\d{2}\b", ln):
+            week_lines.append(ln)
+
+    q = (user_query or "").lower()
+    wants_tomorrow = "tomorrow" in q
+    wants_week = ("week" in q) or ("next days" in q)
+
+    if wants_tomorrow and tomorrow_line:
+        out = tomorrow_line.replace("tomorrow", "Tomorrow", 1)
+        # Remove explicit date in tomorrow replies, e.g. "Tomorrow (2026-03-04)"
+        out = re.sub(r"\bTomorrow\s*\([^)]*\)", "Tomorrow", out)
+        if "rain" not in out.lower():
+            # Keep rain probability explicit for tomorrow responses
+            out = out + ", no rain expected"
+        if not out.endswith("."):
+            out += "."
+        return out
+
+    if wants_week and week_lines:
+        # Very short weekly headline using first 3 entries
+        sample = "; ".join(week_lines[:3])
+        return f"Here is a short weekly outlook: {sample}."
+
+    if summary_line:
+        return summary_line + "."
+
+    # Fallback to legacy humanizer behavior
+    return humanize_weather(snippet)

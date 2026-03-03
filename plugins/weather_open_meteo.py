@@ -16,6 +16,11 @@ from urllib.parse import quote_plus
 import aiohttp
 import datetime
 import re
+import time
+
+
+# In-memory weather cache keyed by "city|timezone"
+_WEATHER_CACHE: dict[str, dict] = {}
 
 
 async def _geocode(city: str, debug: bool = False) -> Optional[dict]:
@@ -132,6 +137,51 @@ async def _fetch_open_meteo(lat: float, lon: float, timezone: str, debug: bool =
     return data
 
 
+def _cache_key(city: str, timezone: str) -> str:
+    return f"{(city or '').strip().lower()}|{(timezone or 'UTC').strip()}"
+
+
+async def _get_weather_data_cached(city: str, timezone: str, ttl_seconds: int, debug: bool = False) -> tuple[Optional[dict], int, bool]:
+    """Return weather data with cache.
+
+    Returns (data, age_seconds, from_cache).
+    """
+    key = _cache_key(city, timezone)
+    now = time.time()
+    cached = _WEATHER_CACHE.get(key)
+
+    if cached:
+        age = int(max(0, now - float(cached.get("fetched_at", now))))
+        if age <= max(0, int(ttl_seconds)) and cached.get("data") is not None:
+            return cached.get("data"), age, True
+
+    # Refresh from APIs
+    geo = await _geocode(city, debug=debug)
+    if not geo:
+        # Fallback to stale cache if available
+        if cached and cached.get("data") is not None:
+            age = int(max(0, now - float(cached.get("fetched_at", now))))
+            return cached.get("data"), age, True
+        return None, 0, False
+
+    lat = geo.get("latitude")
+    lon = geo.get("longitude")
+    data = await _fetch_open_meteo(lat, lon, timezone=timezone, debug=debug)
+    if data is None:
+        if cached and cached.get("data") is not None:
+            age = int(max(0, now - float(cached.get("fetched_at", now))))
+            return cached.get("data"), age, True
+        return None, 0, False
+
+    _WEATHER_CACHE[key] = {
+        "data": data,
+        "fetched_at": now,
+        "city": city,
+        "timezone": timezone,
+    }
+    return data, 0, False
+
+
 def _nearest_hour_index(times: list, debug: bool = False) -> Optional[int]:
     if not times:
         return None
@@ -174,23 +224,25 @@ async def _prefetch_open_meteo(user_input: str, history, debug: bool = False, se
     if not city:
         return None
 
-    if debug:
-        print(f"[debug] open-meteo plugin: geocoding {city}")
-
-    geo = await _geocode(city, debug=debug)
-    if not geo:
-        return None
-
-    lat = geo.get("latitude")
-    lon = geo.get("longitude")
-    name = geo.get("name") or city
     timezone = "UTC"
     if settings and settings.get("local_timezone"):
         timezone = settings.get("local_timezone")
+    ttl_seconds = 600
+    if settings:
+        try:
+            ttl_seconds = int(settings.get("weather_cache_ttl_seconds", 600))
+        except Exception:
+            ttl_seconds = 600
 
-    data = await _fetch_open_meteo(lat, lon, timezone=timezone, debug=debug)
+    if debug:
+        print(f"[debug] open-meteo plugin: city={city} timezone={timezone} ttl={ttl_seconds}s")
+
+    data, age_seconds, from_cache = await _get_weather_data_cached(city, timezone, ttl_seconds, debug=debug)
     if not data:
         return None
+
+    # Name from cached geocode city when available is not retained, keep user/default city title
+    name = city.title()
 
     current = data.get("current_weather", {})
     temp = current.get("temperature")
@@ -305,10 +357,14 @@ async def _prefetch_open_meteo(user_input: str, history, debug: bool = False, se
 
     week_text = "\n".join(week_lines)
 
+    freshness = f"freshness: age_seconds={age_seconds}, ttl_seconds={ttl_seconds}, source={'cache' if from_cache else 'api'}"
+
     return (
         "Weather (sanitized): " + summary + "\n"
         "Response guidance: reply short by default in 1 to 2 sentences. "
         "Use the detailed sections only when user asks for detail, tomorrow, hourly timing, or weekly outlook.\n"
+        + freshness
+        + "\n"
         "Today details:\n"
         + summary
         + "\n"
@@ -320,5 +376,36 @@ async def _prefetch_open_meteo(user_input: str, history, debug: bool = False, se
     )
 
 
+async def _startup_prewarm_open_meteo(debug: bool = False, settings: Optional[dict] = None) -> Optional[str]:
+    """Prewarm weather cache on startup so first weather question is instant."""
+    if settings and not settings.get("weather_prefetch_on_start", True):
+        return None
+
+    city = None
+    timezone = "UTC"
+    ttl_seconds = 600
+    if settings:
+        city = settings.get("default_location")
+        timezone = settings.get("local_timezone") or "UTC"
+        try:
+            ttl_seconds = int(settings.get("weather_cache_ttl_seconds", 600))
+        except Exception:
+            ttl_seconds = 600
+
+    if not city:
+        return None
+
+    data, age_seconds, from_cache = await _get_weather_data_cached(city, timezone, ttl_seconds, debug=debug)
+    if not data:
+        return None
+    return f"open_meteo prewarmed for {city} ({'cache' if from_cache else 'api'}, age={age_seconds}s)"
+
+
 def register():
-    return {"actions": {}, "pre_send": [_prefetch_open_meteo], "provider": "open_meteo"}
+    return {
+        "actions": {},
+        "pre_send": [_prefetch_open_meteo],
+        "on_start": [_startup_prewarm_open_meteo],
+        "category": "weather",
+        "provider": "open_meteo",
+    }

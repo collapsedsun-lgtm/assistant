@@ -4,6 +4,9 @@
   "default_temperature_unit": "Celsius",
   "ollama_use_session": true,
   "weather_provider": "open_meteo",
+  "weather_cache_ttl_seconds": 600,
+  "weather_prefetch_on_start": true,
+  "always_on_time_context": true,
   "llm_stream": true,
 
   "model": "gemma:2b-instruct",
@@ -23,7 +26,6 @@
   "llm_timeout": 600,
   "auto_run_plugins": true,
   "preferred_plugins": {
-    "get_time": "general_plugin",
     "turn_on_light": "automation_plugin",
     "turn_off_light": "automation_plugin"
   }

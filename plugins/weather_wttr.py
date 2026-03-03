@@ -69,4 +69,4 @@ async def _prefetch_weather(user_input: str, history, debug: bool = False, setti
 
 def register():
     # This plugin does not register action handlers, only a pre_send hook.
-    return {"actions": {}, "pre_send": [_prefetch_weather], "provider": "wttr"}
+    return {"actions": {}, "pre_send": [_prefetch_weather], "category": "weather", "provider": "wttr"}

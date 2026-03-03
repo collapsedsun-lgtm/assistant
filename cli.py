@@ -88,7 +88,7 @@ async def main_async():
     history: List[dict] = []
     actions_list = actions.load_actions()
     settings = load_settings()
-    handlers, pre_send_hooks = load_plugins(settings)
+    handlers, pre_send_hooks, on_start_hooks = load_plugins(settings)
 
     # Initialize TTS (Piper) and optional playback manager if configured
     tts_settings = settings.get("tts", {}) if isinstance(settings, dict) else {}
@@ -229,6 +229,33 @@ async def main_async():
 
     if pre_send_hooks:
         print(f"\nDiscovered {len(pre_send_hooks)} pre_send hooks available from plugins.")
+
+    if on_start_hooks:
+        print(f"\nRunning {len(on_start_hooks)} startup hooks...")
+        for hook in on_start_hooks:
+            try:
+                maybe = None
+                try:
+                    import inspect
+                    sig = inspect.signature(hook)
+                    kwargs = {}
+                    params = sig.parameters
+                    if "debug" in params:
+                        kwargs["debug"] = args.debug
+                    if "settings" in params or "config" in params:
+                        kwargs["settings"] = settings
+                    maybe = await hook(**kwargs)
+                except Exception:
+                    try:
+                        maybe = await hook()
+                    except Exception:
+                        maybe = None
+
+                if args.debug:
+                    print(f"[debug] startup hook {getattr(hook, '__name__', repr(hook))} returned: {repr(maybe)[:300]}")
+            except Exception as e:
+                if args.debug:
+                    print(f"[debug] startup hook failed: {e}")
 
     # If not running in mock mode, perform a lightweight health check against the model
     if not args.mock:
@@ -398,23 +425,41 @@ async def main_async():
             continue
 
         parsed = try_parse_tool_call(llm_output, actions_list)
-        # If the model emitted a `null` action but we have sanitized
-        # pre-fetched facts and the user's request looks informational
-        # (e.g., weather, definition), prefer returning the sanitized
-        # facts as a plain-text assistant reply rather than treating
-        # `null` as an executable action.
-        informational_keywords = ("weather", "define", "what is", "who is", "tell me", "info", "information")
-        if parsed and getattr(parsed, "tool", "") == "null" and prefetch_texts:
+        # If we have sanitized pre-fetched facts and the user's request looks
+        # informational (e.g., weather, definition), prefer returning the
+        # sanitized facts as a plain-text assistant reply rather than relying
+        # on the model to self-report data access.
+        informational_keywords = ("weather", "forecast", "rain", "define", "what is", "who is", "tell me", "info", "information", "time", "date")
+        if prefetch_texts and (not parsed or getattr(parsed, "tool", "") == "null"):
             low = (user_input or "").lower()
             if any(k in low for k in informational_keywords):
-                # Convert weather snippets into human-friendly sentences
-                friendly = []
-                for p in prefetch_texts:
-                    if isinstance(p, str) and p.lower().startswith("weather (sanitized):"):
-                        friendly.append(web_sanitizer.humanize_weather(p))
-                    else:
-                        friendly.append(p)
-                assistant_text = "\n".join(friendly)
+                is_weather_query = any(k in low for k in ("weather", "forecast", "rain", "tomorrow", "week", "sunny"))
+                is_time_query = any(k in low for k in ("time", "date", "day", "hour"))
+
+                weather_snippets = [p for p in prefetch_texts if isinstance(p, str) and p.lower().startswith("weather (sanitized):")]
+                time_snippets = [p for p in prefetch_texts if isinstance(p, str) and p.lower().startswith("time (sanitized):")]
+
+                if is_weather_query and weather_snippets:
+                    assistant_text = web_sanitizer.summarize_open_meteo_weather(weather_snippets[0], user_input)
+                elif is_time_query and time_snippets:
+                    assistant_text = web_sanitizer.summarize_time_context(time_snippets[0])
+                else:
+                    # Generic fallback: avoid dumping raw context blocks
+                    friendly = []
+                    for p in prefetch_texts:
+                        if not isinstance(p, str):
+                            continue
+                        if p.lower().startswith("weather (sanitized):"):
+                            friendly.append(web_sanitizer.summarize_open_meteo_weather(p, user_input))
+                        elif p.lower().startswith("time (sanitized):"):
+                            # include time only for explicit time/date questions
+                            if is_time_query:
+                                friendly.append(web_sanitizer.summarize_time_context(p))
+                        else:
+                            friendly.append(p)
+                    assistant_text = "\n".join([x for x in friendly if x]).strip()
+                    if not assistant_text:
+                        assistant_text = "I do not have enough information to answer that yet."
                 print("Assistant:", assistant_text)
                 history.append({"role": "user", "content": user_input})
                 history.append({"role": "assistant", "content": assistant_text})
