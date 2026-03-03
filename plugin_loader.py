@@ -20,21 +20,23 @@ from typing import Dict, Callable, Awaitable, Any, List, Tuple
 PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 
 
-def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict], Awaitable[Any]]], List[Callable]]:
+def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict], Awaitable[Any]]], List[Callable], List[Callable]]:
     """Discover and load plugin handlers and optional hooks.
 
-    Returns a tuple `(handlers, pre_send_hooks)` where `handlers` maps
+    Returns a tuple `(handlers, pre_send_hooks, on_start_hooks)` where `handlers` maps
     action name -> async handler, and `pre_send_hooks` is a list of
     async callables that accept `(user_input, history)` and return a
     sanitized string (or None) to be injected into the prompt.
+    `on_start_hooks` is a list of async callables that run once at startup.
 
     Faulty plugins are ignored and do not prevent other plugins from loading.
     """
     handlers: Dict[str, Callable[[dict], Awaitable[Any]]] = {}
     pre_send_hooks: List[Callable] = []
+    on_start_hooks: List[Callable] = []
     provider_map: Dict[str, str] = {}
     if not os.path.isdir(PLUGIN_DIR):
-        return handlers, pre_send_hooks
+        return handlers, pre_send_hooks, on_start_hooks
 
     # Discover Python files in the plugins directory (load by path).
     for entry in os.listdir(PLUGIN_DIR):
@@ -105,15 +107,28 @@ def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict
                     # Optional pre_send hooks: include only if provider matches settings (when provided)
                     if "pre_send" in regs and isinstance(regs["pre_send"], list):
                         include = True
-                        if settings and provider:
-                            # If settings has a weather_provider (or generic provider) preference, honor it
-                            pref = settings.get("weather_provider") or settings.get("provider")
+                        category = (regs.get("category") or "").lower() if isinstance(regs, dict) else ""
+                        if settings and provider and category == "weather":
+                            pref = settings.get("weather_provider")
                             if pref and str(pref).lower() != str(provider).lower():
                                 include = False
                         if include:
                             for h in regs["pre_send"]:
                                 if callable(h):
                                     pre_send_hooks.append(h)
+
+                    # Optional startup hooks: include only if provider matches settings (when provided)
+                    if "on_start" in regs and isinstance(regs["on_start"], list):
+                        include = True
+                        category = (regs.get("category") or "").lower() if isinstance(regs, dict) else ""
+                        if settings and provider and category == "weather":
+                            pref = settings.get("weather_provider")
+                            if pref and str(pref).lower() != str(provider).lower():
+                                include = False
+                        if include:
+                            for h in regs["on_start"]:
+                                if callable(h):
+                                    on_start_hooks.append(h)
                 # If register returned a tuple (compatibility), try to unpack
                 elif isinstance(regs, tuple) and len(regs) == 2:
                     a, hooks = regs
@@ -127,4 +142,4 @@ def load_plugins(settings: dict | None = None) -> Tuple[Dict[str, Callable[[dict
                 # ignore faulty plugins for now
                 continue
 
-    return handlers, pre_send_hooks
+    return handlers, pre_send_hooks, on_start_hooks

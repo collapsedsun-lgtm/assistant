@@ -24,23 +24,25 @@ pip install -r requirements.txt
 Run (mock LLM for safe testing):
 
 ```bash
-python assistant.py --mock
+python main.py --mock
 ```
 
 Run (real LLM - requires Ollama or configured endpoint):
 
 ```bash
-python assistant.py
+python main.py
 ```
 
 Project layout
-- `assistant.py` — async REPL that talks to the LLM and emits JSON actions.
+- `main.py` — program entrypoint.
+- `cli.py` — async REPL loop and runtime orchestration.
+- `assistant.py` — legacy helper module (REPL moved to `cli.py`).
 - `actions.json` — single source of truth describing available actions and their argument shapes.
 - `actions.py` — helpers and pydantic validation for action specs and tool calls.
 - `system_prompt.txt` — system prompt provided to the model.
 - `llm_config.py` — LLM endpoint and options (hardcoded for now).
 - `plugin_loader.py` — discovers plugins in `plugins/`.
-- `plugins/` — example plugins live here; plugins should implement a `register()` returning a mapping of action_name -> async handler.
+- `plugins/` — plugins can provide action handlers and context hooks.
 
 Contributing
 - Add new actions by editing `actions.json` (this is the single source of truth for both the LLM and runners).
@@ -51,17 +53,28 @@ Notes
 - The agent uses a rolling context window (last few exchanges) to provide short-term memory.
 - The agent will never execute actions itself; it prints validated action JSON. Build a separate runner to consume and safely execute those actions.
 
-Recent changes (2026-03-01)
-- **Improve latency by using KV store**: a new `kv_store.py` and related changes reduce repeated computation and speed up repeated queries.
-- **Session / bootstrap behavior**: the assistant now attempts a one-time bootstrap with the model when the backend supports server-side sessions; note that `/api/chat` endpoints do not provide persistent session semantics, so session-mode is disabled for that endpoint and the assistant falls back to the per-request prompt flow.
-- **Keep-alive and health-checks**: requests include a `keep_alive` option (configurable via `settings.json`) to reduce cold-starts; health checks were changed to connectivity-only checks to avoid contaminating session state.
-- **Streaming parsing fix**: streaming output parsing was tightened to avoid model metadata leaking into assistant text (you should see cleaner streaming outputs now).
-- **Files changed**: `assistant.py`, `kv_store.py`, `llm_config.py`, `plugin_loader.py`, plugins under `plugins/`, `system_prompt.txt`, and `settings.json` were touched in the recent PR.
+Always-on knowledge and weather caching
+- The assistant injects pre-fetched sanitized context on each turn using plugin `pre_send` hooks.
+- Current defaults include:
+	- time context (`plugins/context_time.py`)
+	- weather context (`plugins/weather_open_meteo.py`)
+- Weather is cached in-memory with TTL and can be prewarmed at startup.
+- Startup prewarm runs via plugin `on_start` hooks so first weather query is fast.
 
-Where to look next
-- `assistant.py`: main changes to session handling, bootstrap ordering, and streaming parsing.
-- `settings.json`: new/updated keys control `ollama_use_session` and `ollama_keep_alive`.
-- `kv_store.py`: caching/kv logic used to improve latency on repeated operations.
+Relevant `settings.json` keys
+- `weather_provider`: select weather plugin provider (for weather-category hooks).
+- `weather_cache_ttl_seconds`: weather cache invalidation interval.
+- `weather_prefetch_on_start`: prewarm weather cache on assistant startup.
+- `always_on_time_context`: inject local time context every turn.
+- `local_timezone`: timezone used for time context and weather formatting.
+
+Script helper
+- `scripts/run_assistant.sh` creates/activates `.venv`, installs requirements, and runs `main.py`.
+- Example:
+
+```bash
+./scripts/run_assistant.sh --show-settings
+```
 
 
 CLI Flags
@@ -74,12 +87,12 @@ CLI Flags
 Examples
 Run with mock LLM and plugin execution (safe for debugging):
 ```bash
-python assistant.py --mock --run-plugins
+python main.py --mock --run-plugins
 ```
 
 Run with the real LLM, 3-exchange context and memory summarization enabled:
 ```bash
-python assistant.py --rolling-window 3 --summarize-memory --run-plugins --debug
+python main.py --rolling-window 3 --summarize-memory --run-plugins --debug
 ```
 
 Plugin example
@@ -99,7 +112,7 @@ def register():
 Run the agent (mock or real) and enable plugin execution:
 
 ```bash
-python assistant.py --run-plugins --mock
+python main.py --run-plugins --mock
 ```
 
 The agent will validate model outputs against `actions.json` and call
