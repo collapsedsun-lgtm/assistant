@@ -72,3 +72,9 @@ Thumbs.db
 # Misc
 *.bak
 *.swp
+
+# Local Piper/voice binaries and models
+# Ignore everything in the voices directory but keep the .gitkeep file so
+# the empty folder can be tracked in git.
+voices/*
+!voices/.gitkeep

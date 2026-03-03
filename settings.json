@@ -1,9 +1,9 @@
 {
-  "default_location": "Bristol",
+  "default_location": "Bristol, UK",
   "local_timezone": "Europe/London",
   "default_temperature_unit": "Celsius",
   "ollama_use_session": true,
-  "weather_provider": "open_meteo",
+  "weather_provider": "wttr",
   "llm_stream": true,
 
   "model": "gemma:2b-instruct",
@@ -13,7 +13,7 @@
     "options": {
       "temperature": 0.0,
       "top_p": 0.9,
-      "num_predict": 50
+      "num_predict": 150
     }
   },
 
@@ -26,5 +26,21 @@
     "get_time": "general_plugin",
     "turn_on_light": "automation_plugin",
     "turn_off_light": "automation_plugin"
+  }
+  ,
+  "tts": {
+    "enabled": true,
+    "provider": "piper",
+    "mode": "binary",
+    "server_url": "http://localhost:5002/synthesize",
+    "binary_cmd": ["piper", "--model", "./voices/amy_medium/en_US-amy-medium.onnx", "--output-file", "{out}", "{text}"],
+    "headers": {},
+    "output_dir": "/tmp",
+    "playback": {
+      "enabled": true,
+      "preferred_player": "/usr/bin/aplay",
+      "volume": 1.0,
+      "queue": true
+    }
   }
 }

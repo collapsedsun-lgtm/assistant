@@ -29,26 +29,6 @@ OLLAMA_SESSION_BOOTSTRAPPED = False
 
 from utils import _extract_texts, _sanitize_assistant_output, load_system_prompt, load_settings
 
-
-def _sanitize_assistant_output(text: str) -> str:
-    """Remove leading speaker labels that models sometimes emit (e.g. "Assistant:").
-
-    This prevents duplicate printed labels like "Assistant: Assistant: ...".
-    """
-    if not isinstance(text, str):
-        try:
-            text = str(text)
-        except Exception:
-            return ""
-    import re
-
-    # Remove common leading speaker prefixes (case-insensitive), e.g.
-    # "Assistant: ", "assistant -", "Assistant —".
-    cleaned = re.sub(r"^\s*(assistant)\s*[:\-–—]\s*", "", text, flags=re.I)
-    # Also remove a bare leading 'assistant' followed by whitespace/newline
-    cleaned = re.sub(r"^\s*(assistant)\s+", "", cleaned, flags=re.I)
-    return cleaned
-
 # Number of most-recent exchanges (user + assistant) to include in context.
 # This is a hardcoded constant for now; make configurable later if needed.
 ROLLING_WINDOW = 5
