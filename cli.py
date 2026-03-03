@@ -418,6 +418,15 @@ async def main_async():
                 print("Assistant:", assistant_text)
                 history.append({"role": "user", "content": user_input})
                 history.append({"role": "assistant", "content": assistant_text})
+                try:
+                    await session_module.persist_message(session_id, kv, "assistant", assistant_text)
+                except Exception:
+                    pass
+                # Speak the assisted text when TTS is enabled
+                try:
+                    await _maybe_speak(assistant_text)
+                except Exception:
+                    pass
                 continue
         if parsed:
             # Print the action JSON (the agent's intended action)
