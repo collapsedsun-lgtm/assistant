@@ -30,6 +30,141 @@ async def ainput(prompt: str = "") -> str:
     return await loop.run_in_executor(None, input, prompt)
 
 
+async def tts_synth_worker(piper_tts, playback_manager, tts_sentence_queue: "asyncio.Queue[str]", tts_streaming_output: bool):
+    """Module-level TTS synth worker.
+
+    This is extracted to allow unit testing. It consumes sentences from
+    `tts_sentence_queue`, synthesizes them (streaming when available), and
+    schedules playback in-order.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        sent = await tts_sentence_queue.get()
+        try:
+            # If Piper supports streaming output and it's enabled, stream chunks
+            if tts_streaming_output and hasattr(piper_tts, "stream_synthesize"):
+                try:
+                    gen = piper_tts.stream_synthesize(sent)
+                except Exception:
+                    gen = None
+
+                if gen is not None:
+                    # Prefer direct piping to a local player for lowest latency
+                    proc = None
+                    try:
+                        if shutil.which("aplay"):
+                            proc = subprocess.Popen(["aplay", "-t", "wav", "-"], stdin=subprocess.PIPE)
+                        elif shutil.which("ffplay"):
+                            proc = subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"], stdin=subprocess.PIPE)
+
+                        if proc and proc.stdin:
+                            for chunk in gen:
+                                try:
+                                    proc.stdin.write(chunk)
+                                except Exception:
+                                    pass
+                            try:
+                                proc.stdin.close()
+                                proc.wait()
+                            except Exception:
+                                pass
+                        else:
+                            # No direct player available: accumulate then enqueue/play
+                            buf = bytearray()
+                            for chunk in gen:
+                                buf.extend(chunk)
+                            audio = bytes(buf)
+                            if playback_manager:
+                                playback_manager.enqueue_bytes(audio)
+                            else:
+                                fd, path = tempfile.mkstemp(suffix=".wav")
+                                os.close(fd)
+                                try:
+                                    with open(path, "wb") as fh:
+                                        fh.write(audio)
+                                    if shutil.which("xdg-open"):
+                                        subprocess.Popen(["xdg-open", path])
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print("[TTS synth worker streaming error]:", e)
+                    finally:
+                        try:
+                            # Ensure generator exhaustion/cleanup
+                            if hasattr(gen, "close"):
+                                try:
+                                    gen.close()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    # Done with this sentence
+                    try:
+                        tts_sentence_queue.task_done()
+                    except Exception:
+                        pass
+                    continue
+
+            # Fallback: synthesize whole audio (blocking in threadpool)
+            audio = await loop.run_in_executor(None, piper_tts.synthesize, sent, None)
+            if isinstance(audio, (bytes, bytearray)):
+                if playback_manager:
+                    playback_manager.enqueue_bytes(bytes(audio))
+                    print("[TTS enqueued for playback]")
+                else:
+                    # Best-effort direct piping to local player
+                    played = False
+                    if shutil.which("aplay"):
+                        p = subprocess.Popen(["aplay", "-t", "wav", "-"], stdin=subprocess.PIPE)
+                        try:
+                            p.stdin.write(audio)
+                            p.stdin.close()
+                            p.wait()
+                            played = True
+                        except Exception:
+                            pass
+                    elif shutil.which("ffplay"):
+                        p = subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", "-i", "-"], stdin=subprocess.PIPE)
+                        try:
+                            p.stdin.write(audio)
+                            p.stdin.close()
+                            p.wait()
+                            played = True
+                        except Exception:
+                            pass
+
+                    if not played:
+                        # fallback to disk file
+                        fd, path = tempfile.mkstemp(suffix=".wav")
+                        os.close(fd)
+                        try:
+                            with open(path, "wb") as fh:
+                                fh.write(audio)
+                            if shutil.which("xdg-open"):
+                                subprocess.Popen(["xdg-open", path])
+                        except Exception:
+                            pass
+            else:
+                # If synth returns a file path (string), enqueue or play file
+                if isinstance(audio, str):
+                    if playback_manager:
+                        playback_manager.enqueue_file(audio)
+                    else:
+                        if shutil.which("aplay"):
+                            subprocess.Popen(["aplay", audio])
+                        elif shutil.which("ffplay"):
+                            subprocess.Popen(["ffplay", "-autoexit", "-nodisp", "-loglevel", "quiet", audio])
+                        elif shutil.which("xdg-open"):
+                            subprocess.Popen(["xdg-open", audio])
+        except Exception as e:
+            print("[TTS synth worker error]:", e)
+        finally:
+            try:
+                tts_sentence_queue.task_done()
+            except Exception:
+                pass
+
+
 async def main_async():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true", help="Use a mock LLM response for testing")
@@ -117,6 +252,25 @@ async def main_async():
                 print("TTS playback enabled")
         except Exception as e:
             print("Failed to initialize playback manager:", e)
+
+    # Enable or disable pseudo-streaming TTS (sentence-by-sentence) via settings.json
+    tts_streaming_enabled = bool(tts_settings.get("streaming", True))
+    # Optional Piper server-side streaming of audio bytes (if supported)
+    tts_streaming_output = bool(tts_settings.get("streaming_output", False))
+
+    # Queue and worker to synthesize sentences sequentially so Piper output
+    # is produced in-order and playback happens in sequence. This prevents
+    # concurrent Piper invocations from reordering audio.
+    tts_sentence_queue: "asyncio.Queue[str]" = asyncio.Queue()
+
+    
+
+    # Start the synth worker only if Piper is configured and streaming is enabled
+    if piper_tts and tts_streaming_enabled:
+        try:
+            asyncio.create_task(tts_synth_worker(piper_tts, playback_manager, tts_sentence_queue, tts_streaming_output))
+        except Exception:
+            pass
 
     async def _maybe_speak(text: str):
         if not piper_tts:
@@ -353,6 +507,8 @@ async def main_async():
                 mode = None  # 'maybe_json' or 'text'
                 detected_action = False
                 stream_printed_progressively = False
+                # buffer for assembling partial sentences for progressive TTS
+                text_buffer = ""
                 try:
                     async for part in llm_output:
                         # Determine mode from first non-whitespace char of first part
@@ -374,9 +530,38 @@ async def main_async():
                         cumulative += part
 
                         if mode == "text":
-                            # Buffer text parts instead of printing progressively
-                            chunks.append(part)
-                        else:
+                            # Progressive pseudo-streaming: collect text and flush
+                            # complete sentences as soon as they arrive.
+                            import re
+
+                            text_buffer += part
+                            # Split into sentences keeping trailing punctuation.
+                            sentences = re.split(r'(?<=[.!?])\s+', text_buffer)
+                            # All but the last are complete sentences
+                            for sent in sentences[:-1]:
+                                s = sent.strip()
+                                if not s:
+                                    continue
+                                chunks.append(s + " ")
+                                # Print progressively to console only when streaming is enabled
+                                if tts_streaming_enabled:
+                                    try:
+                                        print(s, end=" ", flush=True)
+                                    except Exception:
+                                        pass
+                                # Schedule TTS playback for each sentence if enabled
+                                if tts_streaming_enabled and piper_tts:
+                                    try:
+                                        # Put sentence into the synth queue for sequential synthesis
+                                        try:
+                                            tts_sentence_queue.put_nowait(s)
+                                        except Exception:
+                                            # fallback to direct speak call if queue isn't available
+                                            asyncio.create_task(_maybe_speak(s))
+                                    except Exception:
+                                        pass
+                                # Keep the trailing partial sentence in buffer
+                                text_buffer = sentences[-1]
                             # buffer JSON-like responses and attempt to parse as a tool call
                             try:
                                 parsed_check = try_parse_tool_call(cumulative, actions_list)
@@ -402,6 +587,19 @@ async def main_async():
                         # treat the buffered content as text
                         final_content = cumulative
                     else:
+                        # Append any leftover partial sentence to the buffered chunks
+                        if text_buffer and text_buffer.strip():
+                            leftover = text_buffer.strip()
+                            chunks.append(leftover)
+                            # Enqueue final partial sentence for synthesis if streaming
+                            if tts_streaming_enabled and piper_tts:
+                                try:
+                                    tts_sentence_queue.put_nowait(leftover)
+                                except Exception:
+                                    try:
+                                        await _maybe_speak(leftover)
+                                    except Exception:
+                                        pass
                         final_content = "".join(chunks)
 
                 # Cache the final streaming response when possible
