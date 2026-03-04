@@ -500,6 +500,8 @@ async def main_async():
                 summarize_memory=args.summarize_memory,
                 pre_send_hooks=pre_send_hooks,
             )
+            # Track whether we printed progressively from streaming output
+            stream_printed_progressively = False
             # If a streaming generator was returned, consume it and assemble final text
             if hasattr(llm_output, "__aiter__"):
                 chunks = []
@@ -522,10 +524,9 @@ async def main_async():
                                 mode = "maybe_json"
                             else:
                                 mode = "text"
-                                # Do not print the assistant label here; we'll print
-                                # the sanitized final reply below to avoid duplicate
-                                # leading labels when the model emits 'Assistant: ...'.
-                                stream_printed_progressively = True
+                                # Do not mark as printed yet; only set
+                                # `stream_printed_progressively` when we actually
+                                # print parts below (depends on `tts_streaming_enabled`).
 
                         cumulative += part
 
@@ -547,6 +548,8 @@ async def main_async():
                                 if tts_streaming_enabled:
                                     try:
                                         print(s, end=" ", flush=True)
+                                        # We printed progressively to the console
+                                        stream_printed_progressively = True
                                     except Exception:
                                         pass
                                 # Schedule TTS playback for each sentence if enabled
@@ -591,6 +594,13 @@ async def main_async():
                         if text_buffer and text_buffer.strip():
                             leftover = text_buffer.strip()
                             chunks.append(leftover)
+                            # Print the leftover if streaming so console matches TTS
+                            if tts_streaming_enabled:
+                                try:
+                                    print(leftover, end=" ", flush=True)
+                                    stream_printed_progressively = True
+                                except Exception:
+                                    pass
                             # Enqueue final partial sentence for synthesis if streaming
                             if tts_streaming_enabled and piper_tts:
                                 try:
@@ -658,16 +668,26 @@ async def main_async():
                     assistant_text = "\n".join([x for x in friendly if x]).strip()
                     if not assistant_text:
                         assistant_text = "I do not have enough information to answer that yet."
-                print("Assistant:", assistant_text)
+                # If we printed progressively from the streaming path, avoid
+                # printing the assistant label again; otherwise print normally.
+                if stream_printed_progressively:
+                    try:
+                        print("")
+                    except Exception:
+                        pass
+                else:
+                    print("Assistant:", assistant_text)
                 history.append({"role": "user", "content": user_input})
                 history.append({"role": "assistant", "content": assistant_text})
                 try:
                     await session_module.persist_message(session_id, kv, "assistant", assistant_text)
                 except Exception:
                     pass
-                # Speak the assisted text when TTS is enabled
+                # Speak the assisted text when TTS is enabled (skip full-text speak
+                # when sentence-streaming is enabled to avoid duplicates)
                 try:
-                    await _maybe_speak(assistant_text)
+                    if not tts_streaming_enabled:
+                        await _maybe_speak(assistant_text)
                 except Exception:
                     pass
                 continue
@@ -729,14 +749,22 @@ async def main_async():
 
                             # Sanitize, print and persist the formatted assistant reply
                             cleaned_formatted = _sanitize_assistant_output(formatted_text)
-                            print("Assistant:", cleaned_formatted)
+                            # Avoid duplicate printing if progressive streaming already printed parts
+                            if stream_printed_progressively:
+                                try:
+                                    print("")
+                                except Exception:
+                                    pass
+                            else:
+                                print("Assistant:", cleaned_formatted)
                             history.append({"role": "assistant", "content": cleaned_formatted})
                             try:
                                 await session_module.persist_message(session_id, kv, "assistant", cleaned_formatted)
                             except Exception:
                                 pass
                             try:
-                                await _maybe_speak(cleaned_formatted)
+                                if not tts_streaming_enabled:
+                                    await _maybe_speak(cleaned_formatted)
                             except Exception:
                                 pass
                         except Exception as e:
@@ -757,7 +785,13 @@ async def main_async():
 
         # Not a tool call: normal assistant reply
         cleaned = _sanitize_assistant_output(llm_output)
-        print("Assistant:", cleaned)
+        if stream_printed_progressively:
+            try:
+                print("")
+            except Exception:
+                pass
+        else:
+            print("Assistant:", cleaned)
         # Save the user message then assistant reply in chronological order
         history.append({"role": "assistant", "content": cleaned})
         try:
@@ -765,6 +799,7 @@ async def main_async():
         except Exception:
             pass
         try:
-            await _maybe_speak(cleaned)
+            if not tts_streaming_enabled:
+                await _maybe_speak(cleaned)
         except Exception:
             pass
