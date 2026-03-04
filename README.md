@@ -68,6 +68,29 @@ Relevant `settings.json` keys
 - `always_on_time_context`: inject local time context every turn.
 - `local_timezone`: timezone used for time context and weather formatting.
 
+TTS / Streaming
+---------------
+- `tts.streaming` (boolean, default: `true`): when enabled the CLI will progressively print completed sentences from the LLM as they arrive and will enqueue each completed sentence for speech synthesis. This provides a "pseudo-streaming" experience even when the underlying TTS engine does not stream audio. When disabled, the CLI will wait for the final assistant reply and send the whole reply to TTS once.
+- `tts.streaming_output` (boolean, default: `false`): when enabled and supported by the configured Piper installation, the assistant will request streamed audio chunks from the Piper server/CLI and begin piping audio to a player (e.g. `aplay`/`ffplay`) as chunks arrive for lower latency. If the Piper server/CLI does not support streaming, leave this setting `false` and the assistant will synthesize each sentence fully before playback.
+
+Example `settings.json` snippet:
+
+```jsonc
+"tts": {
+	"enabled": true,
+	"provider": "piper",
+	"streaming": true,
+	"streaming_output": false,
+	"mode": "binary",
+	"binary_cmd": ["piper", "--model", "./voices/amy_medium/en_US-amy-medium.onnx", "--output-file", "{out}", "{text}"]
+}
+```
+
+Notes:
+- Progressive printing is controlled by `tts.streaming` and also enables sentence queuing to the TTS worker in `cli.py`.
+- `tts.streaming_output` requires a Piper server/CLI that actually streams audio data; otherwise use the default per-sentence synth (`streaming_output: false`).
+- Restart the assistant after changing `settings.json`.
+
 Script helper
 - `scripts/run_assistant.sh` creates/activates `.venv`, installs requirements, and runs `main.py`.
 - Example:

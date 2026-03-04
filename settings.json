@@ -9,7 +9,7 @@
   "always_on_time_context": true,
   "llm_stream": true,
 
-  "model": "gemma:2b-instruct",
+  "model": "llama3.2:3b",
   "ollama_url": "http://localhost:11434/api/chat",
   "llm_options": {
     "stream": false,
@@ -33,6 +33,8 @@
   "tts": {
     "enabled": true,
     "provider": "piper",
+    "streaming": true,
+    "streaming_output": true,
     "mode": "binary",
     "server_url": "http://localhost:5002/synthesize",
     "binary_cmd": ["piper", "--model", "./voices/amy_medium/en_US-amy-medium.onnx", "--output-file", "{out}", "{text}"],
