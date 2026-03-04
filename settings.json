@@ -34,7 +34,7 @@
     "enabled": true,
     "provider": "piper",
     "streaming": true,
-    "streaming_output": false,
+    "streaming_output": true,
     "mode": "binary",
     "server_url": "http://localhost:5002/synthesize",
     "binary_cmd": ["piper", "--model", "./voices/amy_medium/en_US-amy-medium.onnx", "--output-file", "{out}", "{text}"],
