@@ -3,6 +3,7 @@ from typing import List
 
 import actions
 import memory_summarizer
+import db_adapter
 
 
 def build_messages(
@@ -62,7 +63,7 @@ def try_parse_tool_call(llm_output: str, actions_list: List[actions.ActionSpec])
     except Exception:
         pass
 
-    # Attempt to find first {...} JSON object in the output
+    # Attempt to find first {...} JSON object in the output (compat shim)
     start = llm_output.find("{")
     end = llm_output.rfind("}")
     if start == -1 or end == -1 or end <= start:
@@ -73,3 +74,53 @@ def try_parse_tool_call(llm_output: str, actions_list: List[actions.ActionSpec])
         return actions.validate_tool_call(parsed, actions_list)
     except Exception:
         return None
+
+
+def parse_tool_calls(llm_output: str, actions_list: List[actions.ActionSpec]):
+    """Extract leading text and all valid tool calls (JSON objects) from LLM output.
+
+    Returns (text_prefix, [ToolCall, ...]) where text_prefix is the text before
+    the first JSON object (trimmed) and the list contains validated `ToolCall`
+    pydantic models for each JSON object found.
+    """
+    calls = []
+    first_brace = llm_output.find("{")
+    text_prefix = llm_output[:first_brace].strip() if first_brace != -1 else llm_output.strip()
+    idx = 0
+    L = len(llm_output)
+    while True:
+        start = llm_output.find("{", idx)
+        if start == -1:
+            break
+        depth = 0
+        end = -1
+        for j in range(start, L):
+            ch = llm_output[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            break
+        candidate = llm_output[start : end + 1]
+        try:
+            parsed_json = json.loads(candidate)
+            validated = actions.validate_tool_call(parsed_json, actions_list)
+            if validated:
+                calls.append(validated)
+        except Exception:
+            pass
+        idx = end + 1
+    return text_prefix, calls
+
+
+def save_memo_via_db(origin: str | None, destination: str | None, content: str, metadata: dict | None = None) -> int:
+    """Helper exposed for other modules to persist a memo."""
+    return db_adapter.save_memo(origin=origin, destination=destination, content=content, metadata=metadata)
+
+
+def list_memos_via_db(filters: dict | None = None, limit: int = 100):
+    return db_adapter.list_memos(filters=filters, limit=limit)

@@ -15,5 +15,41 @@
       "description": "Turn off the light in the specified room.",
       "args": {"room": "string"}
     }
+    ,
+    {
+      "name": "create_memo",
+      "description": "Create a memo addressed from origin to destination. Example: create_memo origin='Daniel' destination='Teresa' title='Reminder' content='Buy milk'.",
+      "args": {"origin": "string", "destination": "string", "title": "string", "content": "string", "metadata": "json|string", "due_date": "ISO8601 datetime string (optional)"}
+    },
+    {
+      "name": "list_memos",
+      "description": "List memos, optionally filtered by origin/destination/state. Example: list_memos destination='Teresa' limit=10.",
+      "args": {"origin": "string (optional)", "destination": "string (optional)", "state": "string (optional)", "limit": "int (optional)"}
+    },
+    {
+      "name": "create_list",
+      "description": "Create a named list for a destination with optional initial items. Example: create_list origin='Daniel' destination='Teresa' title='Shopping' items=['eggs','milk'].",
+      "args": {"origin": "string", "destination": "string", "title": "string", "items": "list[string]", "metadata": "json|string"}
+    },
+    {
+      "name": "list_lists",
+      "description": "List existing lists, optionally filtered by origin/destination/title. Example: list_lists destination='Teresa'.",
+      "args": {"origin": "string (optional)", "destination": "string (optional)", "title": "string (optional)", "limit": "int (optional)"}
+    },
+    {
+      "name": "add_list_item",
+      "description": "Add a single item to a list. Specify `list_id` or identify the list by origin/destination/title. Example: add_list_item list_id=123 item_text='bread'.",
+      "args": {"list_id": "int (optional)", "origin": "string (optional)", "destination": "string (optional)", "title": "string (optional)", "item_text": "string", "create_if_missing": "bool (optional)"}
+    },
+    {
+      "name": "get_lists_for_user",
+      "description": "Return lists for a given destination user. Example: get_lists_for_user destination='Teresa'.",
+      "args": {"destination": "string", "limit": "int (optional)"}
+    },
+    {
+      "name": "get_list",
+      "description": "Return a list and its items by `list_id`. Example: get_list list_id=123.",
+      "args": {"list_id": "int"}
+    }
   ]
 }

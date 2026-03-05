@@ -14,10 +14,11 @@ from kv_store import get_default_kv, response_cache_key
 import session as session_module
 from llm_client import call_llm, check_model_endpoint
 from utils import load_system_prompt, load_settings, _sanitize_assistant_output
-from assistant_core import build_messages, try_parse_tool_call
+from assistant_core import build_messages, try_parse_tool_call, parse_tool_calls
 from assistant import ROLLING_WINDOW
 from tts_piper import PiperTTS
 from tts_playback import PlaybackManager
+import db_adapter
 import tempfile
 import time
 import os
@@ -222,7 +223,16 @@ async def main_async():
 
     history: List[dict] = []
     actions_list = actions.load_actions()
+    actions_desc = actions.actions_description(actions_list)
     settings = load_settings()
+    # Initialize local DB (creates tables) before plugins/actions run
+    try:
+        db_path = settings.get("db_path") if isinstance(settings, dict) else None
+        db_adapter.init(db_path=db_path)
+        if args.debug:
+            print(f"[debug] DB initialized (path={db_path or 'assistant/assistant.db'})")
+    except Exception as e:
+        print("Warning: failed to initialize DB:", e)
     handlers, pre_send_hooks, on_start_hooks = load_plugins(settings)
 
     # Initialize TTS (Piper) and optional playback manager if configured
@@ -632,13 +642,14 @@ async def main_async():
             print("Assistant (error):", e)
             continue
 
-        parsed = try_parse_tool_call(llm_output, actions_list)
+        # Parse leading assistant text and any tool-call JSON objects in the output
+        assistant_text, parsed_calls = parse_tool_calls(llm_output, actions_list)
         # If we have sanitized pre-fetched facts and the user's request looks
         # informational (e.g., weather, definition), prefer returning the
         # sanitized facts as a plain-text assistant reply rather than relying
         # on the model to self-report data access.
         informational_keywords = ("weather", "forecast", "rain", "define", "what is", "who is", "tell me", "info", "information", "time", "date")
-        if prefetch_texts and (not parsed or getattr(parsed, "tool", "") == "null"):
+        if prefetch_texts and (not parsed_calls or (len(parsed_calls) == 1 and getattr(parsed_calls[0], "tool", "") == "null")):
             low = (user_input or "").lower()
             if any(k in low for k in informational_keywords):
                 is_weather_query = any(k in low for k in ("weather", "forecast", "rain", "tomorrow", "week", "sunny"))
@@ -691,96 +702,110 @@ async def main_async():
                 except Exception:
                     pass
                 continue
-        if parsed:
-            # Print the action JSON (the agent's intended action)
-            # Use `model_dump_json` when available (pydantic v2), fall back to `.json()` for compatibility.
-            if hasattr(parsed, "model_dump_json"):
-                parsed_json = parsed.model_dump_json()
-            else:
-                parsed_json = parsed.json()
-            print("Assistant (action):", parsed_json)
-
-            # Optionally execute a matching plugin handler if allowed and available
-            if args.run_plugins:
-                handler = handlers.get(parsed.tool)
-                if handler:
-                    try:
-                        result = await handler(parsed.args)
-                        print("Plugin result:", result)
-
-                        # Ask the LLM to convert the plugin result into a
-                        # short, friendly assistant reply suitable for TTS.
-                        try:
-                            # Ensure result is serializable
-                            try:
-                                result_json = json.dumps(result)
-                            except Exception:
-                                result_json = str(result)
-
-                            format_prompt = (
-                                "Convert the following plugin result JSON into a short, "
-                                "friendly assistant reply suitable for spoken output (1-2 sentences). "
-                                "If the plugin result indicates an error, explain it briefly and clearly.\n\n"
-                                f"Plugin result: {result_json}\n"
-                                f"Original user request: {user_input}\n"
-                            )
-
-                            formatted, _ = await call_llm(
-                                format_prompt,
-                                history,
-                                mock=args.mock,
-                                debug=args.debug,
-                                rolling_window=args.rolling_window,
-                                summarize_memory=False,
-                                pre_send_hooks=None,
-                            )
-
-                            # If streaming, consume
-                            if hasattr(formatted, "__aiter__"):
-                                parts = []
-                                try:
-                                    async for p in formatted:
-                                        parts.append(p)
-                                except Exception:
-                                    pass
-                                formatted_text = "".join(parts)
-                            else:
-                                formatted_text = formatted
-
-                            # Sanitize, print and persist the formatted assistant reply
-                            cleaned_formatted = _sanitize_assistant_output(formatted_text)
-                            # Avoid duplicate printing if progressive streaming already printed parts
-                            if stream_printed_progressively:
-                                try:
-                                    print("")
-                                except Exception:
-                                    pass
-                            else:
-                                print("Assistant:", cleaned_formatted)
-                            history.append({"role": "assistant", "content": cleaned_formatted})
-                            try:
-                                await session_module.persist_message(session_id, kv, "assistant", cleaned_formatted)
-                            except Exception:
-                                pass
-                            try:
-                                if not tts_streaming_enabled:
-                                    await _maybe_speak(cleaned_formatted)
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            # Fall back to printing raw plugin result
-                            print("Plugin formatting error:", e)
-                    except Exception as e:
-                        print("Plugin execution error:", e)
-                else:
-                    print(f"No plugin registered for action '{parsed.tool}'")
-
-            # Save the user message then assistant reply in chronological order
-            history.append({"role": "assistant", "content": parsed_json})
+        # Speak any assistant prefix text (strip surrounding quotes/paren) unless streaming already printed it
+        if assistant_text:
+            cleaned = assistant_text.strip()
+            # strip surrounding quotes or parentheses if present
+            if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+                cleaned = cleaned[1:-1].strip()
+            if (cleaned.startswith('(') and cleaned.endswith(')')):
+                cleaned = cleaned[1:-1].strip()
+            if not stream_printed_progressively:
+                print("Assistant:", cleaned)
             try:
-                await session_module.persist_message(session_id, kv, "assistant", parsed_json)
+                if not tts_streaming_enabled:
+                    await _maybe_speak(cleaned)
             except Exception:
                 pass
+
+        # Execute any parsed tool calls sequentially
+        if parsed_calls:
+            for parsed in parsed_calls:
+                # Format/print the action JSON
+                if hasattr(parsed, "model_dump_json"):
+                    parsed_json = parsed.model_dump_json()
+                else:
+                    parsed_json = parsed.json()
+                print("Assistant (action):", parsed_json)
+
+                plugin_result = None
+                if args.run_plugins:
+                    handler = handlers.get(parsed.tool)
+                    if handler:
+                        try:
+                            plugin_result = await handler(parsed.args)
+                            print("Plugin result:", plugin_result)
+                        except Exception as e:
+                            print("Plugin execution error:", e)
+                            plugin_result = {"error": str(e)}
+                    else:
+                        print(f"No plugin registered for action '{parsed.tool}'")
+
+                # Convert plugin result into a short assistant reply via the LLM
+                try:
+                    try:
+                        result_json = json.dumps(plugin_result)
+                    except Exception:
+                        result_json = str(plugin_result)
+
+                    format_prompt = (
+                        "Convert the following plugin result JSON into a short, "
+                        "friendly assistant reply suitable for spoken output (1-2 sentences). "
+                        "If the plugin result indicates an error, explain it briefly and clearly. If it succeeds you don't need to say anything.\n"
+                        f"Plugin result: {result_json}\n"
+                        f"Original user request: {user_input}\n"
+                    )
+
+                    formatted, _ = await call_llm(
+                        format_prompt,
+                        history,
+                        mock=args.mock,
+                        debug=args.debug,
+                        rolling_window=args.rolling_window,
+                        summarize_memory=False,
+                        pre_send_hooks=None,
+                    )
+
+                    if hasattr(formatted, "__aiter__"):
+                        parts = []
+                        try:
+                            async for p in formatted:
+                                parts.append(p)
+                        except Exception:
+                            pass
+                        formatted_text = "".join(parts)
+                    else:
+                        formatted_text = formatted
+
+                    cleaned_formatted = _sanitize_assistant_output(formatted_text)
+                    if stream_printed_progressively:
+                        try:
+                            print("")
+                        except Exception:
+                            pass
+                    else:
+                        print("Assistant:", cleaned_formatted)
+
+                    history.append({"role": "assistant", "content": cleaned_formatted})
+                    try:
+                        await session_module.persist_message(session_id, kv, "assistant", cleaned_formatted)
+                    except Exception:
+                        pass
+                    try:
+                        if not tts_streaming_enabled:
+                            await _maybe_speak(cleaned_formatted)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print("Plugin formatting error:", e)
+
+                # Persist the assistant action JSON as an assistant message
+                history.append({"role": "assistant", "content": parsed_json})
+                try:
+                    await session_module.persist_message(session_id, kv, "assistant", parsed_json)
+                except Exception:
+                    pass
+
             continue
 
         # Not a tool call: normal assistant reply
